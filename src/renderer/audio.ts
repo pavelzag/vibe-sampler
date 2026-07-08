@@ -70,19 +70,12 @@ export function createChannels(): Channel[] {
     },
     muted: false,
     sample: null,
-    steps: createHousePattern(index)
+    steps: createHousePattern()
   }));
 }
 
-function createHousePattern(channelId: number): boolean[] {
-  return Array.from({ length: 16 }, (_, step) => {
-    if (channelId === 0) return step % 4 === 0;
-    if (channelId === 1) return step === 4 || step === 12;
-    if (channelId === 2) return step === 4 || step === 12;
-    if (channelId === 3) return step % 2 === 1;
-    if (channelId === 4) return step === 2 || step === 6 || step === 10 || step === 14;
-    return false;
-  });
+export function createHousePattern(): boolean[] {
+  return Array.from({ length: 16 }, () => true);
 }
 
 export class SamplerEngine {
@@ -146,20 +139,20 @@ export class SamplerEngine {
     this.master.gain.setTargetAtTime(clamp(level, 0, 1), this.context.currentTime, 0.01);
   }
 
-  play(channel: Channel, velocity = 1, when = this.context.currentTime): void {
+  play(channel: Channel, velocity = 1, when = this.context.currentTime): boolean {
     if (!channel.sample || channel.muted) {
-      return;
+      return false;
     }
 
     const duration = channel.sample.trimEnd - channel.sample.trimStart;
     if (duration <= 0.01) {
-      return;
+      return false;
     }
 
     const envelopeDuration = getEnvelopeDuration(channel.envelope);
     const playbackDuration = Math.min(duration, envelopeDuration);
     if (playbackDuration <= 0.01) {
-      return;
+      return false;
     }
 
     const source = this.context.createBufferSource();
@@ -172,6 +165,7 @@ export class SamplerEngine {
     velocityGain.connect(envelopeGain);
     envelopeGain.connect(this.channelGains[channel.id]);
     source.start(when, channel.sample.trimStart, playbackDuration);
+    return true;
   }
 
   async decode(blob: Blob, name: string): Promise<Sample> {

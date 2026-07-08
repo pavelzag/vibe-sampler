@@ -186,9 +186,27 @@ footer,
   background: #25291c;
 }
 
+.channel-hit {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: inherit;
+  background:
+    radial-gradient(circle at 50% 80%, rgba(255, 255, 255, 0.18), rgba(255, 106, 106, 0.28) 42%, rgba(255, 106, 106, 0) 72%),
+    linear-gradient(180deg, rgba(216, 240, 95, 0.16), rgba(255, 106, 106, 0.16));
+  opacity: 0;
+  transform: scale(0.94);
+  pointer-events: none;
+}
+
+.channel-hit {
+  animation: channel-pound 260ms ease-out;
+}
+
 .channel-level-fill {
   position: absolute;
   inset: auto 0 0 0;
+  z-index: 0;
   height: calc(var(--level, 0) * 100%);
   background: linear-gradient(0deg, rgba(102, 212, 207, 0.42), rgba(216, 240, 95, 0.28));
   transition: height 90ms linear;
@@ -219,6 +237,21 @@ footer,
   grid-area: note;
   position: relative;
   z-index: 1;
+}
+
+@keyframes channel-pound {
+  0% {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+  35% {
+    opacity: 1;
+    transform: scale(1.02);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.18);
+  }
 }
 
 .editor {

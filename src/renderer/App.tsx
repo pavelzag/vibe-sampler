@@ -34,11 +34,10 @@ const volumeMapStorageKey = "vibe-sampler.volume-control-map.v4";
 const transportMapStorageKey = "vibe-sampler.transport-control-map.v4";
 const defaultTransportControls = {
   swing: { key: "cc:16", label: "CC 16" },
-  tempo: { key: "cc:24", label: "CC 24" },
   master: { key: "cc:28", label: "CC 28" }
 } satisfies Record<TransportBindTarget, { key: string; label: string }>;
 const defaultVolumeControlNumbers = [35, 37, 39, 40, 43, 44, 17, 24];
-type TransportBindTarget = "swing" | "tempo" | "master";
+type TransportBindTarget = "swing" | "master";
 type StoredControl = { key: string; label: string } | null;
 
 function App(): React.JSX.Element {
@@ -52,10 +51,10 @@ function App(): React.JSX.Element {
   const [swing, setSwing] = useState(0.18);
   const [masterLevel, setMasterLevel] = useState(0.9);
   const [swingControl, setSwingControl] = useState<StoredControl>(defaultTransportControls.swing);
-  const [tempoControl, setTempoControl] = useState<StoredControl>(defaultTransportControls.tempo);
   const [masterControl, setMasterControl] = useState<StoredControl>(defaultTransportControls.master);
   const [transportBindTarget, setTransportBindTarget] = useState<TransportBindTarget | null>(null);
   const [currentStep, setCurrentStep] = useState(0);
+  const [channelHitTicks, setChannelHitTicks] = useState(() => Array.from({ length: 8 }, () => 0));
   const [audioLatencyMs, setAudioLatencyMs] = useState(0);
   const [midiMonitorEnabled, setMidiMonitorEnabled] = useState(true);
   const [midiEvents, setMidiEvents] = useState<MidiActivity[]>([]);
@@ -77,7 +76,6 @@ function App(): React.JSX.Element {
   const keyLearnIndexRef = useRef<number | null>(null);
   const volumeControlMapRef = useRef<StoredControl[]>(Array.from({ length: 8 }, () => null));
   const swingControlRef = useRef<StoredControl>(defaultTransportControls.swing);
-  const tempoControlRef = useRef<StoredControl>(defaultTransportControls.tempo);
   const masterControlRef = useRef<StoredControl>(defaultTransportControls.master);
   const transportBindTargetRef = useRef<TransportBindTarget | null>(null);
 
@@ -150,12 +148,10 @@ function App(): React.JSX.Element {
     }
 
     try {
-      const controls = JSON.parse(stored) as { swing?: StoredControl; tempo?: StoredControl; master?: StoredControl };
+      const controls = JSON.parse(stored) as { swing?: StoredControl; master?: StoredControl };
       swingControlRef.current = normalizeStoredControl(controls.swing);
-      tempoControlRef.current = normalizeStoredControl(controls.tempo);
       masterControlRef.current = normalizeStoredControl(controls.master);
       setSwingControl(swingControlRef.current);
-      setTempoControl(tempoControlRef.current);
       setMasterControl(masterControlRef.current);
     } catch {
       localStorage.removeItem(transportMapStorageKey);
@@ -179,11 +175,11 @@ function App(): React.JSX.Element {
 
   const triggerChannel = useCallback((channelId: number, velocity = 1, selectChannel = false) => {
     const channel = channelsRef.current[channelId];
-    if (engine.isRunning()) {
-      engine.play(channel, velocity);
-    } else {
-      engine.resumeSoon();
-      engine.play(channel, velocity);
+    const didPlay = engine.isRunning()
+      ? engine.play(channel, velocity)
+      : (engine.resumeSoon(), engine.play(channel, velocity));
+    if (didPlay) {
+      pulseChannel(channelId);
     }
     if (selectChannel) {
       setActiveChannelId(channelId);
@@ -245,6 +241,13 @@ function App(): React.JSX.Element {
       const storedControl = toStoredControl(control.key, control.label);
       const actions: string[] = [];
 
+      if (control.key === "cc:24") {
+        if (transportBindTargetRef.current) {
+          setMessage("CC 24 is reserved for Ride level.");
+        }
+        return actions;
+      }
+
       if (transportBindTargetRef.current === "swing") {
         swingControlRef.current = storedControl;
         setSwingControl(storedControl);
@@ -253,16 +256,6 @@ function App(): React.JSX.Element {
         saveTransportMap();
         setMessage(`Swing assigned to ${control.label}`);
         return [`Swing assigned to ${control.label}`];
-      }
-
-      if (transportBindTargetRef.current === "tempo") {
-        tempoControlRef.current = storedControl;
-        setTempoControl(storedControl);
-        setTempo(Math.round(60 + level * 130));
-        setTransportBindTarget(null);
-        saveTransportMap();
-        setMessage(`Tempo assigned to ${control.label}`);
-        return [`Tempo assigned to ${control.label}`];
       }
 
       if (transportBindTargetRef.current === "master") {
@@ -278,11 +271,6 @@ function App(): React.JSX.Element {
       if (swingControlRef.current?.key === control.key) {
         setSwing(level * 0.55);
         actions.push("Swing");
-      }
-
-      if (tempoControlRef.current?.key === control.key) {
-        setTempo(Math.round(60 + level * 130));
-        actions.push("Tempo");
       }
 
       if (masterControlRef.current?.key === control.key) {
@@ -364,7 +352,9 @@ function App(): React.JSX.Element {
       setCurrentStep(step);
       for (const channel of channelsRef.current) {
         if (channel.steps[step]) {
-          engine.play(channel, 1);
+          if (engine.play(channel, 1)) {
+            pulseChannel(channel.id);
+          }
         }
       }
       stepRef.current = (step + 1) % 16;
@@ -478,7 +468,6 @@ function App(): React.JSX.Element {
       transportMapStorageKey,
       JSON.stringify({
         swing: swingControlRef.current,
-        tempo: tempoControlRef.current,
         master: masterControlRef.current
       })
     );
@@ -487,18 +476,19 @@ function App(): React.JSX.Element {
   function resetTransportMap(): void {
     const defaults = {
       swing: defaultTransportControls.swing,
-      tempo: defaultTransportControls.tempo,
       master: defaultTransportControls.master
     };
     localStorage.setItem(transportMapStorageKey, JSON.stringify(defaults));
     swingControlRef.current = defaults.swing;
-    tempoControlRef.current = defaults.tempo;
     masterControlRef.current = defaults.master;
     setSwingControl(defaults.swing);
-    setTempoControl(defaults.tempo);
     setMasterControl(defaults.master);
     setTransportBindTarget(null);
     setMessage("Transport knob map reset to the fixed Monologue map.");
+  }
+
+  function pulseChannel(channelId: number): void {
+    setChannelHitTicks((current) => current.map((tick, index) => (index === channelId ? tick + 1 : tick)));
   }
 
   function startKeyLearn(): void {
@@ -572,6 +562,7 @@ function App(): React.JSX.Element {
               onClick={() => setActiveChannelId(channel.id)}
               style={{ "--level": channel.muted ? 0 : channel.level } as React.CSSProperties}
             >
+              <span className="channel-hit" key={channelHitTicks[channel.id]} />
               <span className="channel-level-fill" />
               <span className="channel-index">{channel.id + 1}</span>
               <span className="channel-name">{channel.name}</span>
@@ -671,13 +662,9 @@ function App(): React.JSX.Element {
             </div>
             <div className="transport-map">
               <span>Attack swing {swingControl === null ? "not bound" : swingControl.label}</span>
-              <span>Tempo {tempoControl === null ? "not bound" : tempoControl.label}</span>
               <span>Master volume {masterControl === null ? "not bound" : masterControl.label}</span>
               <button onClick={() => setTransportBindTarget("swing")}>
                 {transportBindTarget === "swing" ? "Move Attack" : "Bind Swing"}
-              </button>
-              <button onClick={() => setTransportBindTarget("tempo")}>
-                {transportBindTarget === "tempo" ? "Move Tempo" : "Bind Tempo"}
               </button>
               <button onClick={() => setTransportBindTarget("master")}>
                 {transportBindTarget === "master" ? "Move Master" : "Bind Master"}
@@ -796,7 +783,7 @@ function App(): React.JSX.Element {
       <footer>
         <span>{message}</span>
         <span>Mute keys: q w e r t y u i</span>
-        <span>Attack controls swing, Tempo controls BPM, Master Volume controls master amplitude after binding</span>
+        <span>Attack controls swing, Master Volume controls master amplitude after binding</span>
         <span>Audio latency: {audioLatencyMs ? `${audioLatencyMs.toFixed(1)} ms` : "unknown"}</span>
       </footer>
     </main>

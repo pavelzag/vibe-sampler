@@ -1,4 +1,5 @@
 import type { Channel, Sample, SamplerEngine } from "./audio";
+import { createHousePattern } from "./audio";
 
 type SampleModuleMap = Record<string, string>;
 
@@ -67,7 +68,8 @@ export function applyBankToChannels(channels: Channel[], bankId: string, samples
   return channels.map((channel, index) => ({
     ...channel,
     name: bank.slots[index]?.channelName ?? channel.name,
-    sample: samples[index] ?? channel.sample
+    sample: samples[index] ?? channel.sample,
+    steps: createHousePattern()
   }));
 }
 
