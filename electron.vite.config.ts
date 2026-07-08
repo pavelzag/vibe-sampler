@@ -13,6 +13,7 @@ export default defineConfig({
     }
   },
   renderer: {
+    base: "./",
     plugins: [react()],
     build: {
       outDir: "dist/renderer"

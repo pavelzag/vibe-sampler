@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import type { Root } from "react-dom/client";
 import {
   Circle,
   Eraser,
@@ -10,16 +11,20 @@ import {
   Radio,
   RotateCcw,
   Scissors,
-  SlidersHorizontal,
   Wand2
 } from "lucide-react";
 import { Channel, Sample, SamplerEngine, createChannels, getEnvelopeDuration, midiNoteName } from "./audio";
 import { applyBankToChannels, defaultBankId, loadSoundBank, soundBanks } from "./banks";
+import { installRendererErrorLogging, logError, logInfo, logWarn } from "./logger";
 import { MidiActivity, MidiControlMessage, MidiManager, MidiStatus } from "./midi";
+import { applyPatternPreset, defaultPatternId, findPatternPreset, patternPresets } from "./patterns";
 import "./styles.css";
 
-const engine = new SamplerEngine();
+installRendererErrorLogging();
+
+const engine = createSamplerEngine();
 const muteKeys = ["q", "w", "e", "r", "t", "y", "u", "i"];
+const triggerKeys = ["a", "s", "d", "f", "g", "h", "j", "k"];
 const defaultVolumeControls = [
   "VCO2 pitch",
   "VCO2 shape",
@@ -40,20 +45,47 @@ const defaultVolumeControlNumbers = [35, 37, 39, 40, 43, 44, 17, 24];
 type TransportBindTarget = "swing" | "master";
 type StoredControl = { key: string; label: string } | null;
 
+declare global {
+  interface Window {
+    vibeSamplerRoot?: Root;
+  }
+}
+
+function createSamplerEngine(): SamplerEngine {
+  try {
+    logInfo("Creating sampler engine");
+    const samplerEngine = new SamplerEngine();
+    logInfo("Sampler engine created", {
+      audioContextState: samplerEngine.audioContext.state,
+      sampleRate: samplerEngine.audioContext.sampleRate,
+      baseLatency: samplerEngine.audioContext.baseLatency
+    });
+    return samplerEngine;
+  } catch (error) {
+    logError("Failed to create sampler engine", error);
+    throw error;
+  }
+}
+
 function App(): React.JSX.Element {
-  const [channels, setChannels] = useState<Channel[]>(createChannels);
+  const [channels, setChannels] = useState<Channel[]>(() => applyPatternPreset(createChannels(), findPatternPreset(defaultPatternId)));
   const [activeChannelId, setActiveChannelId] = useState(0);
   const [isRecording, setIsRecording] = useState(false);
+  const [isPatternRecordArmed, setIsPatternRecordArmed] = useState(false);
+  const [isPatternCountIn, setIsPatternCountIn] = useState(false);
+  const [isPatternRecording, setIsPatternRecording] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [selectedBankId, setSelectedBankId] = useState(defaultBankId);
+  const [selectedPatternId, setSelectedPatternId] = useState(defaultPatternId);
   const [isBankLoading, setIsBankLoading] = useState(false);
-  const [tempo, setTempo] = useState(120);
-  const [swing, setSwing] = useState(0.18);
+  const [tempo, setTempo] = useState(() => findPatternPreset(defaultPatternId).tempo);
+  const [swing, setSwing] = useState(() => findPatternPreset(defaultPatternId).swing);
   const [masterLevel, setMasterLevel] = useState(0.9);
   const [swingControl, setSwingControl] = useState<StoredControl>(defaultTransportControls.swing);
   const [masterControl, setMasterControl] = useState<StoredControl>(defaultTransportControls.master);
   const [transportBindTarget, setTransportBindTarget] = useState<TransportBindTarget | null>(null);
   const [currentStep, setCurrentStep] = useState(0);
+  const [selectedPatternCell, setSelectedPatternCell] = useState<{ channelId: number; step: number } | null>(null);
   const [channelHitTicks, setChannelHitTicks] = useState(() => Array.from({ length: 8 }, () => 0));
   const [audioLatencyMs, setAudioLatencyMs] = useState(0);
   const [midiMonitorEnabled, setMidiMonitorEnabled] = useState(true);
@@ -66,11 +98,20 @@ function App(): React.JSX.Element {
   });
   const [message, setMessage] = useState("Ready");
   const channelsRef = useRef(channels);
+  const activeChannelIdRef = useRef(activeChannelId);
+  const isPatternRecordArmedRef = useRef(isPatternRecordArmed);
+  const isPatternCountInRef = useRef(isPatternCountIn);
+  const isPatternRecordingRef = useRef(isPatternRecording);
+  const patternCountInStepCountRef = useRef(0);
+  const patternRecordStepCountRef = useRef(0);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const midiRef = useRef<MidiManager | null>(null);
   const schedulerRef = useRef<number | null>(null);
   const stepRef = useRef(0);
+  const playingStepRef = useRef(0);
+  const stepStartedAtRef = useRef(performance.now());
+  const stepDurationMsRef = useRef(60_000 / tempo / 4);
   const tempoRef = useRef(tempo);
   const swingRef = useRef(swing);
   const keyLearnIndexRef = useRef<number | null>(null);
@@ -86,6 +127,11 @@ function App(): React.JSX.Element {
   );
 
   useEffect(() => {
+    logInfo("App component mounted");
+    return () => logInfo("App component unmounted");
+  }, []);
+
+  useEffect(() => {
     channelsRef.current = channels;
     volumeControlMapRef.current = channels.map((channel) => toStoredControl(channel.levelControlKey, channel.levelControlLabel));
     channels.forEach((channel) => {
@@ -93,6 +139,22 @@ function App(): React.JSX.Element {
       engine.setChannelPan(channel.id, channel.pan);
     });
   }, [channels]);
+
+  useEffect(() => {
+    activeChannelIdRef.current = activeChannelId;
+  }, [activeChannelId]);
+
+  useEffect(() => {
+    isPatternRecordArmedRef.current = isPatternRecordArmed;
+  }, [isPatternRecordArmed]);
+
+  useEffect(() => {
+    isPatternCountInRef.current = isPatternCountIn;
+  }, [isPatternCountIn]);
+
+  useEffect(() => {
+    isPatternRecordingRef.current = isPatternRecording;
+  }, [isPatternRecording]);
 
   useEffect(() => {
     tempoRef.current = tempo;
@@ -159,31 +221,72 @@ function App(): React.JSX.Element {
   }, []);
 
   const loadBank = useCallback(async (bankId: string) => {
+    logInfo("Loading sound bank", { bankId });
     setIsBankLoading(true);
     setMessage(`Loading ${soundBanks.find((bank) => bank.id === bankId)?.name ?? "sound bank"}`);
     try {
       const samples = await loadSoundBank(engine, bankId);
       setChannels((current) => applyBankToChannels(current, bankId, samples));
       setSelectedBankId(bankId);
+      logInfo("Sound bank loaded", { bankId, sampleCount: samples.length });
       setMessage(`${soundBanks.find((bank) => bank.id === bankId)?.name ?? "Sound bank"} loaded`);
     } catch (error) {
+      logError("Sound bank failed to load", { bankId, error });
       setMessage(error instanceof Error ? error.message : "Could not load sound bank");
     } finally {
       setIsBankLoading(false);
     }
   }, []);
 
-  const triggerChannel = useCallback((channelId: number, velocity = 1, selectChannel = false) => {
+  const applyPattern = useCallback((patternId: string) => {
+    const pattern = findPatternPreset(patternId);
+    logInfo("Applying pattern preset", {
+      patternId,
+      tempo: pattern.tempo,
+      swing: pattern.swing
+    });
+    setSelectedPatternId(pattern.id);
+    setTempo(pattern.tempo);
+    setSwing(pattern.swing);
+    setCurrentStep(0);
+    stepRef.current = 0;
+    setChannels((current) => applyPatternPreset(current, pattern));
+    setMessage(`${pattern.name} pattern loaded at ${pattern.tempo} BPM`);
+  }, []);
+
+  const triggerChannel = useCallback((channelId: number, velocity = 1, selectChannel = false, pulseWhenSilent = false) => {
     const channel = channelsRef.current[channelId];
     const didPlay = engine.isRunning()
       ? engine.play(channel, velocity)
       : (engine.resumeSoon(), engine.play(channel, velocity));
-    if (didPlay) {
+    if (didPlay || pulseWhenSilent) {
       pulseChannel(channelId);
     }
     if (selectChannel) {
       setActiveChannelId(channelId);
     }
+  }, []);
+
+  const recordPatternHit = useCallback((channelId: number) => {
+    if (!isPatternRecordingRef.current) {
+      return;
+    }
+
+    const elapsedMs = performance.now() - stepStartedAtRef.current;
+    const stepOffset = elapsedMs > stepDurationMsRef.current * 0.5 ? 1 : 0;
+    const quantizedStep = (playingStepRef.current + stepOffset) % 16;
+    setSelectedPatternCell({ channelId, step: quantizedStep });
+    setChannels((current) =>
+      current.map((channel) =>
+        channel.id === channelId
+          ? {
+              ...channel,
+              steps: channel.steps.map((enabled, step) => (step === quantizedStep ? true : enabled))
+            }
+          : channel
+      )
+    );
+    setMessage(`Recorded ${channelsRef.current[channelId]?.name ?? "channel"} on step ${quantizedStep + 1}`);
   }, []);
 
   useEffect(() => {
@@ -197,7 +300,7 @@ function App(): React.JSX.Element {
   }, []);
 
   useEffect(() => {
-    const handleMuteKey = (event: KeyboardEvent) => {
+    const handleChannelKey = (event: KeyboardEvent) => {
       const target = event.target;
       if (
         target instanceof HTMLInputElement ||
@@ -208,7 +311,52 @@ function App(): React.JSX.Element {
         return;
       }
 
-      const channelId = muteKeys.indexOf(event.key.toLowerCase());
+      const key = event.key.toLowerCase();
+      if (
+        event.code === "Escape" &&
+        (isPatternRecordArmedRef.current || isPatternCountInRef.current || isPatternRecordingRef.current)
+      ) {
+        event.preventDefault();
+        isPatternRecordArmedRef.current = false;
+        isPatternCountInRef.current = false;
+        isPatternRecordingRef.current = false;
+        setIsPatternRecordArmed(false);
+        setIsPatternCountIn(false);
+        setIsPatternRecording(false);
+        setIsPlaying(true);
+        setMessage("Pattern recording stopped");
+        return;
+      }
+
+      if (event.code === "F8") {
+        event.preventDefault();
+        void togglePatternRecording();
+        return;
+      }
+
+      if (event.metaKey && (event.code === "ArrowUp" || event.code === "ArrowDown")) {
+        event.preventDefault();
+        const direction = event.code === "ArrowUp" ? -1 : 1;
+        const nextChannelId = (activeChannelIdRef.current + direction + channelsRef.current.length) % channelsRef.current.length;
+        selectPatternChannel(nextChannelId);
+        return;
+      }
+
+      if (event.code === "Space") {
+        event.preventDefault();
+        setIsPlaying((value) => !value);
+        return;
+      }
+
+      const triggerChannelId = triggerKeys.indexOf(key);
+      if (triggerChannelId !== -1) {
+        event.preventDefault();
+        triggerChannel(triggerChannelId, 1, true, true);
+        recordPatternHit(triggerChannelId);
+        return;
+      }
+
+      const channelId = muteKeys.indexOf(key);
       if (channelId === -1) {
         return;
       }
@@ -217,9 +365,9 @@ function App(): React.JSX.Element {
       updateChannel(channelId, (channel) => ({ ...channel, muted: !channel.muted }));
     };
 
-    window.addEventListener("keydown", handleMuteKey);
-    return () => window.removeEventListener("keydown", handleMuteKey);
-  }, [updateChannel]);
+    window.addEventListener("keydown", handleChannelKey);
+    return () => window.removeEventListener("keydown", handleChannelKey);
+  }, [recordPatternHit, triggerChannel, updateChannel]);
 
   useEffect(() => {
     const updateLatency = () => setAudioLatencyMs(engine.getLatencyMs());
@@ -327,7 +475,9 @@ function App(): React.JSX.Element {
     );
 
     midiRef.current = midi;
+    logInfo("Connecting MIDI manager");
     void midi.connect().catch((error) => {
+      logWarn("MIDI unavailable", error);
       setMessage(`MIDI unavailable: ${error instanceof Error ? error.message : "unknown error"}`);
     });
   }, [bindDetectedLevelControl, bindTransportControl, midiMonitorEnabled, triggerChannel, updateChannel]);
@@ -337,7 +487,8 @@ function App(): React.JSX.Element {
   }, [loadBank]);
 
   useEffect(() => {
-    if (!isPlaying) {
+    const shouldRunSequencer = isPlaying || isPatternRecordArmed || isPatternCountIn || isPatternRecording;
+    if (!shouldRunSequencer) {
       if (schedulerRef.current) {
         window.clearTimeout(schedulerRef.current);
       }
@@ -349,6 +500,24 @@ function App(): React.JSX.Element {
 
     const tick = () => {
       const step = stepRef.current;
+      const now = performance.now();
+      const isArmedForPatternRecord = isPatternRecordArmedRef.current;
+      let isCountingInPattern = isPatternCountInRef.current;
+      let isRecordingPattern = isPatternRecordingRef.current;
+      if (isArmedForPatternRecord && step === 0) {
+        isPatternRecordArmedRef.current = false;
+        isPatternCountInRef.current = true;
+        patternCountInStepCountRef.current = 0;
+        setIsPatternRecordArmed(false);
+        setIsPatternCountIn(true);
+        setMessage("Count-in for pattern recording");
+        isCountingInPattern = true;
+      }
+      const isRecordMonitoring = isRecordingPattern || isCountingInPattern || isArmedForPatternRecord;
+      const hasPattern = channelsRef.current.some((channel) => channel.steps.some(Boolean));
+
+      playingStepRef.current = step;
+      stepStartedAtRef.current = now;
       setCurrentStep(step);
       for (const channel of channelsRef.current) {
         if (channel.steps[step]) {
@@ -357,11 +526,44 @@ function App(): React.JSX.Element {
           }
         }
       }
+
+      if (isCountingInPattern) {
+        engine.playMetronome(step % 4 === 0);
+      } else if (isRecordMonitoring && !hasPattern) {
+        engine.playMetronome(step % 4 === 0);
+      }
+
       stepRef.current = (step + 1) % 16;
+      if (isCountingInPattern) {
+        patternCountInStepCountRef.current += 1;
+        if (patternCountInStepCountRef.current >= 16) {
+          isPatternCountInRef.current = false;
+          isPatternRecordingRef.current = true;
+          patternRecordStepCountRef.current = 0;
+          setIsPatternCountIn(false);
+          setIsPatternRecording(true);
+          setMessage("Recording keyboard input for 16 steps");
+        }
+      }
+
+      if (isRecordingPattern) {
+        patternRecordStepCountRef.current += 1;
+        if (patternRecordStepCountRef.current >= 16) {
+          isPatternRecordArmedRef.current = false;
+          isPatternCountInRef.current = false;
+          isPatternRecordingRef.current = false;
+          setIsPatternRecordArmed(false);
+          setIsPatternCountIn(false);
+          setIsPatternRecording(false);
+          setIsPlaying(true);
+          setMessage("Pattern recording complete");
+        }
+      }
 
       const baseMs = 60_000 / tempoRef.current / 4;
       const swingAmount = swingRef.current;
       const nextDelayMs = Math.max(20, baseMs * (step % 2 === 0 ? 1 + swingAmount : 1 - swingAmount));
+      stepDurationMsRef.current = nextDelayMs;
       if (!stopped) {
         schedulerRef.current = window.setTimeout(tick, nextDelayMs);
       }
@@ -375,17 +577,34 @@ function App(): React.JSX.Element {
         window.clearTimeout(schedulerRef.current);
       }
     };
-  }, [isPlaying]);
+  }, [isPatternCountIn, isPatternRecordArmed, isPatternRecording, isPlaying]);
 
   async function toggleRecording(): Promise<void> {
-    await engine.resume();
+    logInfo("Toggling recording", { isRecording, activeChannelId });
+    try {
+      await engine.resume();
+      logInfo("Audio engine resumed for recording", { audioContextState: engine.audioContext.state });
+    } catch (error) {
+      logError("Could not resume audio engine for recording", error);
+      setMessage(error instanceof Error ? error.message : "Could not start audio engine");
+      return;
+    }
 
     if (isRecording) {
       mediaRecorderRef.current?.stop();
       return;
     }
 
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      logInfo("Microphone stream acquired", { trackCount: stream.getTracks().length });
+    } catch (error) {
+      logError("Could not acquire microphone stream", error);
+      setMessage(error instanceof Error ? error.message : "Could not access microphone");
+      return;
+    }
+
     const recorder = new MediaRecorder(stream);
     chunksRef.current = [];
     recorder.ondataavailable = (event) => {
@@ -397,9 +616,16 @@ function App(): React.JSX.Element {
       stream.getTracks().forEach((track) => track.stop());
       setIsRecording(false);
       const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
-      const sample = await engine.decode(blob, `${activeChannel.name} take`);
-      updateChannel(activeChannelId, (channel) => ({ ...channel, sample }));
-      setMessage(`Recorded ${sample.name} (${sample.buffer.duration.toFixed(2)}s)`);
+      try {
+        logInfo("Recording stopped, decoding sample", { size: blob.size, type: blob.type });
+        const sample = await engine.decode(blob, `${activeChannel.name} take`);
+        updateChannel(activeChannelId, (channel) => ({ ...channel, sample }));
+        logInfo("Recorded sample decoded", { duration: sample.buffer.duration, channels: sample.buffer.numberOfChannels });
+        setMessage(`Recorded ${sample.name} (${sample.buffer.duration.toFixed(2)}s)`);
+      } catch (error) {
+        logError("Could not decode recorded sample", error);
+        setMessage(error instanceof Error ? error.message : "Could not decode recording");
+      }
     };
     recorder.start();
     mediaRecorderRef.current = recorder;
@@ -431,10 +657,20 @@ function App(): React.JSX.Element {
   }
 
   function toggleStep(channelId: number, step: number): void {
+    setSelectedPatternCell({ channelId, step });
     updateChannel(channelId, (channel) => ({
       ...channel,
       steps: channel.steps.map((enabled, index) => (index === step ? !enabled : enabled))
     }));
+  }
+
+  function clearPatternRow(channelId: number): void {
+    setSelectedPatternCell((current) => (current?.channelId === channelId ? null : current));
+    updateChannel(channelId, (channel) => ({
+      ...channel,
+      steps: channel.steps.map(() => false)
+    }));
+    setMessage(`${channelsRef.current[channelId]?.name ?? "Channel"} row cleared`);
   }
 
   function updateEnvelope(
@@ -496,6 +732,54 @@ function App(): React.JSX.Element {
     setMessage("Key learn armed. Press 8 Monologue keys in order: Kick, Snare, Clap, Hat, Open Hat, Tom, Rim, Ride.");
   }
 
+  function selectPatternChannel(channelId: number): void {
+    setActiveChannelId(channelId);
+    if (isPatternRecordArmedRef.current) {
+      setMessage(`Selected ${channelsRef.current[channelId]?.name ?? "channel"} row. Waiting for step 1.`);
+    } else if (isPatternCountInRef.current) {
+      setMessage(`Selected ${channelsRef.current[channelId]?.name ?? "channel"} row. Count-in running.`);
+    } else if (isPatternRecordingRef.current) {
+      setMessage(`Selected ${channelsRef.current[channelId]?.name ?? "channel"} row. Recording all keyboard input.`);
+    }
+  }
+
+  async function togglePatternRecording(): Promise<void> {
+    if (isPatternRecordArmed || isPatternCountIn || isPatternRecording) {
+      isPatternRecordArmedRef.current = false;
+      isPatternCountInRef.current = false;
+      isPatternRecordingRef.current = false;
+      setIsPatternRecordArmed(false);
+      setIsPatternCountIn(false);
+      setIsPatternRecording(false);
+      setMessage("Stopped pattern recording");
+      return;
+    }
+
+    try {
+      await engine.resume();
+    } catch (error) {
+      logError("Could not resume audio engine for pattern recording", error);
+      setMessage(error instanceof Error ? error.message : "Could not start pattern recorder");
+      return;
+    }
+
+    if (!isPlaying) {
+      stepRef.current = 0;
+      playingStepRef.current = 0;
+      setCurrentStep(0);
+    }
+    patternCountInStepCountRef.current = 0;
+    patternRecordStepCountRef.current = 0;
+    isPatternRecordArmedRef.current = true;
+    isPatternCountInRef.current = false;
+    isPatternRecordingRef.current = false;
+    setIsPlaying(true);
+    setIsPatternRecordArmed(true);
+    setIsPatternCountIn(false);
+    setIsPatternRecording(false);
+    setMessage("Waiting for step 1, then count-in for keyboard pattern recording");
+  }
+
   return (
     <main className="app">
       <header className="topbar">
@@ -504,6 +788,16 @@ function App(): React.JSX.Element {
           <p>8-channel recorder, MIDI pad map, and x0x-style sequencer</p>
         </div>
         <div className="transport">
+          <label className="bank-select">
+            <span>Pattern</span>
+            <select value={selectedPatternId} onChange={(event) => applyPattern(event.target.value)}>
+              {patternPresets.map((pattern) => (
+                <option key={pattern.id} value={pattern.id}>
+                  {pattern.name}
+                </option>
+              ))}
+            </select>
+          </label>
           <label className="bank-select">
             <span>Bank</span>
             <select
@@ -559,14 +853,16 @@ function App(): React.JSX.Element {
             <button
               className={channel.id === activeChannelId ? "channel selected" : "channel"}
               key={channel.id}
-              onClick={() => setActiveChannelId(channel.id)}
+              onPointerDown={() => triggerChannel(channel.id, 1, true, true)}
               style={{ "--level": channel.muted ? 0 : channel.level } as React.CSSProperties}
             >
               <span className="channel-hit" key={channelHitTicks[channel.id]} />
               <span className="channel-level-fill" />
               <span className="channel-index">{channel.id + 1}</span>
               <span className="channel-name">{channel.name}</span>
-              <span className="channel-note">{midiNoteName(channel.note)}</span>
+              <span className="channel-note">
+                {triggerKeys[channel.id].toUpperCase()} / {midiNoteName(channel.note)}
+              </span>
             </button>
           ))}
         </aside>
@@ -684,20 +980,6 @@ function App(): React.JSX.Element {
                     <MicOff size={13} />
                     {channel.muted ? "Muted" : "Mute"}
                   </button>
-                  <div className="control-label">
-                    {channel.levelControlName} volume {channel.levelControlLabel ?? "not bound"}
-                  </div>
-                  <label>
-                    <SlidersHorizontal size={14} />
-                    <input
-                      type="range"
-                      min="-1"
-                      max="1"
-                      step="0.01"
-                      value={channel.pan}
-                      onChange={(event) => updateChannel(channel.id, (item) => ({ ...item, pan: Number(event.target.value) }))}
-                    />
-                  </label>
                 </div>
               ))}
             </div>
@@ -746,31 +1028,55 @@ function App(): React.JSX.Element {
         <div className="sequencer-head">
           <div>
             <h2>Sequencer</h2>
-            <p>16 steps across 8 audio channels</p>
+            <p>
+              {isPatternRecording
+                ? "Recording keyboard input"
+                : isPatternRecordArmed
+                  ? "Waiting for step 1"
+                  : isPatternCountIn
+                    ? "Count-in"
+                  : "16 steps across 8 audio channels"}
+            </p>
           </div>
-          <button onClick={() => setChannels((current) => current.map((channel) => ({ ...channel, steps: channel.steps.map(() => false) })))}>
-            <Scissors size={16} />
-            Clear Pattern
-          </button>
+          <div className="sequencer-actions">
+            <button className={isPatternRecording || isPatternRecordArmed || isPatternCountIn ? "danger active" : ""} onClick={() => void togglePatternRecording()}>
+              <Circle size={16} fill={isPatternRecording || isPatternRecordArmed || isPatternCountIn ? "currentColor" : "none"} />
+              {isPatternRecording ? "Stop Recording" : isPatternCountIn ? "Cancel Count-in" : isPatternRecordArmed ? "Cancel Armed" : "Record Pattern"}
+            </button>
+            <button onClick={() => setChannels((current) => current.map((channel) => ({ ...channel, steps: channel.steps.map(() => false) })))}>
+              <Scissors size={16} />
+              Clear Pattern
+            </button>
+          </div>
         </div>
         <div className="step-grid">
           <div className="step-labels">
             <span />
             {Array.from({ length: 16 }, (_, step) => (
-              <span className={currentStep === step && isPlaying ? "running" : ""} key={step}>
+              <span className={currentStep === step && (isPlaying || isPatternRecordArmed || isPatternCountIn || isPatternRecording) ? "running" : ""} key={step}>
                 {step + 1}
               </span>
-            ))}
-          </div>
-          {channels.map((channel) => (
-            <div className="step-row" key={channel.id}>
-              <button className="row-name" onClick={() => setActiveChannelId(channel.id)}>
-                {channel.name}
-              </button>
+          ))}
+        </div>
+        {channels.map((channel) => (
+            <div
+              className={`${channel.id === activeChannelId ? "step-row selected" : "step-row"} ${
+                selectedPatternCell?.channelId === channel.id ? "has-selected-cell" : ""
+              }`}
+              key={channel.id}
+            >
+              <div className="row-controls">
+                <button className={channel.id === activeChannelId ? "row-name selected" : "row-name"} onClick={() => selectPatternChannel(channel.id)}>
+                  {channel.name}
+                </button>
+                <button className="row-clear" aria-label={`Clear ${channel.name} row`} onClick={() => clearPatternRow(channel.id)}>
+                  <Eraser size={13} />
+                </button>
+              </div>
               {channel.steps.map((enabled, step) => (
                 <button
                   aria-label={`${channel.name} step ${step + 1}`}
-                  className={`${enabled ? "step on" : "step"} ${(step + 1) % 4 === 1 ? "bar" : ""} ${currentStep === step && isPlaying ? "playing" : ""}`}
+                  className={`${enabled ? "step on" : "step"} ${(step + 1) % 4 === 1 ? "bar" : ""} ${channel.id === activeChannelId ? "selected-row" : ""} ${selectedPatternCell?.channelId === channel.id && selectedPatternCell.step === step ? "selected-cell" : ""} ${currentStep === step && (isPlaying || isPatternRecordArmed || isPatternCountIn || isPatternRecording) ? "playing" : ""}`}
                   key={step}
                   onClick={() => toggleStep(channel.id, step)}
                 />
@@ -782,6 +1088,11 @@ function App(): React.JSX.Element {
 
       <footer>
         <span>{message}</span>
+        <span>Space: play / stop</span>
+        <span>F8: arm count-in recording</span>
+        <span>Esc: stop recording</span>
+        <span>Command+Up/Down: recording row</span>
+        <span>Play keys: a s d f g h j k</span>
         <span>Mute keys: q w e r t y u i</span>
         <span>Attack controls swing, Master Volume controls master amplitude after binding</span>
         <span>Audio latency: {audioLatencyMs ? `${audioLatencyMs.toFixed(1)} ms` : "unknown"}</span>
@@ -790,7 +1101,17 @@ function App(): React.JSX.Element {
   );
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+const rootElement = document.getElementById("root");
+if (!rootElement) {
+  logError("Could not mount React app because #root is missing");
+  throw new Error("Missing #root element");
+}
+
+logInfo("Mounting React app");
+const root = window.vibeSamplerRoot ?? createRoot(rootElement);
+window.vibeSamplerRoot = root;
+root.render(<App />);
+logInfo("React app mounted");
 
 function EnvelopeGraph({
   envelope,
@@ -807,7 +1128,6 @@ function EnvelopeGraph({
   const padding = 22;
   const graphWidth = width - padding * 2;
   const graphHeight = height - padding * 2;
-  const minGap = 0.015;
   const maxSeconds = Math.max(0.25, sampleDuration, getEnvelopeDuration(envelope));
   const attackTime = envelope.attack;
   const decayTime = envelope.attack + envelope.decay;
@@ -871,25 +1191,24 @@ function EnvelopeGraph({
     const next = { ...envelope };
 
     if (pointId === "attack") {
-      const maxAttack = Math.max(minGap, decayTime - minGap);
-      next.attack = clamp(time, minGap, maxAttack);
+      next.attack = clamp(time, 0, decayTime);
       next.peak = amplitude;
     }
 
     if (pointId === "decay") {
-      const clampedTime = clamp(time, attackTime + minGap, holdTime - minGap);
+      const clampedTime = clamp(time, attackTime, holdTime);
       next.decay = clampedTime - next.attack;
       next.sustain = amplitude;
     }
 
     if (pointId === "sustain") {
-      const clampedTime = clamp(time, decayTime + minGap, releaseTime - minGap);
+      const clampedTime = clamp(time, decayTime, releaseTime);
       next.hold = clampedTime - next.attack - next.decay;
       next.sustain = amplitude;
     }
 
     if (pointId === "release") {
-      const clampedTime = clamp(time, holdTime + minGap, maxSeconds);
+      const clampedTime = clamp(time, holdTime, maxSeconds);
       next.release = clampedTime - next.attack - next.decay - next.hold;
     }
 

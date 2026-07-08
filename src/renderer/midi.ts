@@ -1,4 +1,5 @@
 import type { Channel } from "./audio";
+import { logInfo, logWarn } from "./logger";
 
 export type MidiStatus = {
   supported: boolean;
@@ -55,12 +56,15 @@ export class MidiManager {
   }
 
   async connect(): Promise<void> {
+    logInfo("MIDI connect requested", { supported: Boolean(navigator.requestMIDIAccess) });
     if (!navigator.requestMIDIAccess) {
+      logWarn("Web MIDI API is not available");
       this.notifyStatus({ supported: false, connectedInputs: [], korgDetected: false });
       return;
     }
 
     this.access = await navigator.requestMIDIAccess();
+    logInfo("MIDI access granted", { inputCount: this.access.inputs.size, outputCount: this.access.outputs.size });
     this.access.onstatechange = () => this.bindInputs();
     this.bindInputs();
   }
@@ -75,6 +79,16 @@ export class MidiManager {
     }
 
     const inputs = Array.from(this.access.inputs.values());
+    logInfo("Binding MIDI inputs", {
+      inputs: inputs.map((input) => ({
+        id: input.id,
+        name: input.name,
+        state: input.state,
+        connection: input.connection,
+        manufacturer: input.manufacturer
+      }))
+    });
+
     for (const input of inputs) {
       input.onmidimessage = (event) => this.handleMessage(event, input.name || input.id);
     }

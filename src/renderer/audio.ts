@@ -1,3 +1,5 @@
+import { logInfo, logWarn } from "./logger";
+
 export type Sample = {
   id: string;
   name: string;
@@ -85,7 +87,13 @@ export class SamplerEngine {
   private channelPanners: StereoPannerNode[];
 
   constructor() {
+    logInfo("Initializing AudioContext", { latencyHint: 0.003 });
     this.context = new AudioContext({ latencyHint: 0.003 });
+    logInfo("AudioContext initialized", {
+      state: this.context.state,
+      sampleRate: this.context.sampleRate,
+      baseLatency: this.context.baseLatency
+    });
     this.master = this.context.createGain();
     this.master.gain.value = 0.9;
     this.master.connect(this.context.destination);
@@ -108,13 +116,17 @@ export class SamplerEngine {
 
   async resume(): Promise<void> {
     if (this.context.state !== "running") {
+      logInfo("Resuming AudioContext", { state: this.context.state });
       await this.context.resume();
+      logInfo("AudioContext resumed", { state: this.context.state });
     }
   }
 
   resumeSoon(): void {
     if (this.context.state !== "running") {
-      void this.context.resume().catch(() => undefined);
+      void this.context.resume().catch((error) => {
+        logWarn("Deferred AudioContext resume failed", error);
+      });
     }
   }
 
@@ -137,6 +149,26 @@ export class SamplerEngine {
 
   setMasterLevel(level: number): void {
     this.master.gain.setTargetAtTime(clamp(level, 0, 1), this.context.currentTime, 0.01);
+  }
+
+  playMetronome(accent = false, when = this.context.currentTime): void {
+    const oscillator = this.context.createOscillator();
+    const gain = this.context.createGain();
+    const filter = this.context.createBiquadFilter();
+    oscillator.type = "triangle";
+    oscillator.frequency.setValueAtTime(accent ? 1760 : 1175, when);
+    oscillator.frequency.exponentialRampToValueAtTime(accent ? 1320 : 880, when + 0.018);
+    filter.type = "bandpass";
+    filter.frequency.value = accent ? 1800 : 1200;
+    filter.Q.value = 8;
+    gain.gain.setValueAtTime(0.0001, when);
+    gain.gain.exponentialRampToValueAtTime(accent ? 0.18 : 0.1, when + 0.002);
+    gain.gain.exponentialRampToValueAtTime(0.0001, when + 0.032);
+    oscillator.connect(gain);
+    gain.connect(filter);
+    filter.connect(this.master);
+    oscillator.start(when);
+    oscillator.stop(when + 0.04);
   }
 
   play(channel: Channel, velocity = 1, when = this.context.currentTime): boolean {
@@ -169,8 +201,15 @@ export class SamplerEngine {
   }
 
   async decode(blob: Blob, name: string): Promise<Sample> {
+    logInfo("Decoding audio blob", { name, size: blob.size, type: blob.type });
     const data = await blob.arrayBuffer();
     const buffer = await this.context.decodeAudioData(data.slice(0));
+    logInfo("Audio blob decoded", {
+      name,
+      duration: buffer.duration,
+      sampleRate: buffer.sampleRate,
+      channels: buffer.numberOfChannels
+    });
     return {
       id: crypto.randomUUID(),
       name,

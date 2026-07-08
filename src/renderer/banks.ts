@@ -1,5 +1,5 @@
 import type { Channel, Sample, SamplerEngine } from "./audio";
-import { createHousePattern } from "./audio";
+import { logInfo } from "./logger";
 
 type SampleModuleMap = Record<string, string>;
 
@@ -46,14 +46,22 @@ export async function loadSoundBank(engine: SamplerEngine, bankId: string): Prom
     throw new Error(`Unknown sound bank: ${bankId}`);
   }
 
+  logInfo("Sound bank sample manifest resolved", {
+    bankId,
+    availableSampleCount: Object.keys(tr909SampleUrls).length,
+    requestedSamples: bank.slots.map((slot) => slot.fileName)
+  });
+
   return Promise.all(
     bank.slots.map(async (slot) => {
       const url = findSampleUrl(slot.fileName);
+      logInfo("Fetching bundled sample", { fileName: slot.fileName, url });
       const response = await fetch(url);
       if (!response.ok) {
         throw new Error(`Could not load ${slot.fileName}`);
       }
       const blob = await response.blob();
+      logInfo("Fetched bundled sample", { fileName: slot.fileName, bytes: blob.size, type: blob.type });
       return engine.decode(blob, slot.label);
     })
   );
@@ -68,8 +76,7 @@ export function applyBankToChannels(channels: Channel[], bankId: string, samples
   return channels.map((channel, index) => ({
     ...channel,
     name: bank.slots[index]?.channelName ?? channel.name,
-    sample: samples[index] ?? channel.sample,
-    steps: createHousePattern()
+    sample: samples[index] ?? channel.sample
   }));
 }
 
