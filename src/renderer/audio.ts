@@ -77,7 +77,7 @@ export function createChannels(): Channel[] {
 }
 
 export function createHousePattern(): boolean[] {
-  return Array.from({ length: 16 }, () => true);
+  return Array.from({ length: 32 }, () => true);
 }
 
 export class SamplerEngine {
@@ -155,20 +155,34 @@ export class SamplerEngine {
     const oscillator = this.context.createOscillator();
     const gain = this.context.createGain();
     const filter = this.context.createBiquadFilter();
-    oscillator.type = "triangle";
-    oscillator.frequency.setValueAtTime(accent ? 1760 : 1175, when);
-    oscillator.frequency.exponentialRampToValueAtTime(accent ? 1320 : 880, when + 0.018);
+    const click = this.context.createBufferSource();
+    const clickGain = this.context.createGain();
+    const clickBuffer = this.context.createBuffer(1, Math.floor(this.context.sampleRate * 0.012), this.context.sampleRate);
+    const clickData = clickBuffer.getChannelData(0);
+    for (let index = 0; index < clickData.length; index += 1) {
+      clickData[index] = (Math.random() * 2 - 1) * (1 - index / clickData.length);
+    }
+    click.buffer = clickBuffer;
+    oscillator.type = "square";
+    oscillator.frequency.setValueAtTime(accent ? 2100 : 1500, when);
+    oscillator.frequency.exponentialRampToValueAtTime(accent ? 1300 : 950, when + 0.022);
     filter.type = "bandpass";
-    filter.frequency.value = accent ? 1800 : 1200;
-    filter.Q.value = 8;
+    filter.frequency.value = accent ? 2400 : 1800;
+    filter.Q.value = 5;
     gain.gain.setValueAtTime(0.0001, when);
-    gain.gain.exponentialRampToValueAtTime(accent ? 0.18 : 0.1, when + 0.002);
-    gain.gain.exponentialRampToValueAtTime(0.0001, when + 0.032);
+    gain.gain.exponentialRampToValueAtTime(accent ? 0.42 : 0.26, when + 0.0015);
+    gain.gain.exponentialRampToValueAtTime(0.0001, when + 0.045);
+    clickGain.gain.setValueAtTime(accent ? 0.32 : 0.2, when);
+    clickGain.gain.exponentialRampToValueAtTime(0.0001, when + 0.014);
     oscillator.connect(gain);
     gain.connect(filter);
+    click.connect(clickGain);
+    clickGain.connect(filter);
     filter.connect(this.master);
     oscillator.start(when);
-    oscillator.stop(when + 0.04);
+    oscillator.stop(when + 0.055);
+    click.start(when);
+    click.stop(when + 0.016);
   }
 
   play(channel: Channel, velocity = 1, when = this.context.currentTime): boolean {

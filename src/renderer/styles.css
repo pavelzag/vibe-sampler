@@ -589,14 +589,17 @@ input[type="range"] {
 .step-grid {
   display: grid;
   gap: 7px;
+  overflow-x: auto;
+  padding: 4px;
 }
 
 .step-labels,
 .step-row {
   display: grid;
-  grid-template-columns: 132px repeat(16, minmax(32px, 1fr));
+  grid-template-columns: 132px repeat(32, minmax(24px, 1fr));
   gap: 6px;
   align-items: center;
+  min-width: 1040px;
 }
 
 .step-row {
@@ -672,7 +675,7 @@ input[type="range"] {
 }
 
 .step {
-  min-height: 34px;
+  min-height: 32px;
   padding: 0;
   border-color: #2d323a;
   background: #15181d;

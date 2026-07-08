@@ -239,6 +239,7 @@ export const patternPresets: PatternPreset[] = [
 ];
 
 export const defaultPatternId = "groovy-house";
+export const patternStepCount = 32;
 
 export function findPatternPreset(patternId: string): PatternPreset {
   return patternPresets.find((preset) => preset.id === patternId) ?? patternPresets[0];
@@ -253,5 +254,6 @@ export function applyPatternPreset(channels: Channel[], preset: PatternPreset): 
 }
 
 function parseSteps(pattern: string): boolean[] {
-  return Array.from({ length: 16 }, (_, index) => pattern[index]?.toLowerCase() === "x");
+  const expandedPattern = pattern.length >= patternStepCount ? pattern : pattern.repeat(Math.ceil(patternStepCount / pattern.length));
+  return Array.from({ length: patternStepCount }, (_, index) => expandedPattern[index]?.toLowerCase() === "x");
 }
