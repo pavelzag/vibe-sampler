@@ -13,56 +13,32 @@ export type PatternPreset = {
 
 const tight: Envelope = {
   attack: 0,
-  peak: 0.9,
-  decay: 0.04,
-  sustain: 0.82,
-  hold: 0.16,
-  release: 0.03
+  release: 0.23
 };
 
 const punchy: Envelope = {
   attack: 0,
-  peak: 0.95,
-  decay: 0.06,
-  sustain: 0.7,
-  hold: 0.22,
-  release: 0.05
+  release: 0.33
 };
 
 const airy: Envelope = {
   attack: 0.002,
-  peak: 0.78,
-  decay: 0.08,
-  sustain: 0.68,
-  hold: 0.34,
-  release: 0.12
+  release: 0.54
 };
 
 const clipped: Envelope = {
   attack: 0,
-  peak: 0.86,
-  decay: 0.025,
-  sustain: 0.6,
-  hold: 0.09,
-  release: 0.025
+  release: 0.14
 };
 
 const loose: Envelope = {
   attack: 0.006,
-  peak: 0.82,
-  decay: 0.1,
-  sustain: 0.72,
-  hold: 0.28,
-  release: 0.1
+  release: 0.48
 };
 
 const long: Envelope = {
   attack: 0.003,
-  peak: 0.84,
-  decay: 0.16,
-  sustain: 0.72,
-  hold: 0.5,
-  release: 0.16
+  release: 0.82
 };
 
 export const patternPresets: PatternPreset[] = [
@@ -70,7 +46,7 @@ export const patternPresets: PatternPreset[] = [
     id: "groovy-house",
     name: "Groovy House",
     tempo: 124,
-    swing: 0.22,
+    swing: 0,
     steps: [
       "x---x---x---x---",
       "----x-------x---",

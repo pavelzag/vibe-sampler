@@ -10,12 +10,19 @@ export type MidiStatus = {
 export type MidiHandlers = {
   onTrigger: (channelId: number, velocity: number) => void;
   onLevel: (channelId: number, level: number) => void;
+  onSendControl: (control: MidiControlMessage) => string[];
+  onEnvelopeControl: (control: MidiControlMessage) => string[];
+  onFxParamControl: (control: MidiControlMessage) => string[] | null;
   onTransportControl: (control: MidiControlMessage) => string[];
   onLevelControlDetected: (control: MidiControlMessage) => boolean;
   onMute: (channelId: number, muted: boolean) => void;
   onLearn: (message: MidiLearnMessage) => void;
   onActivity: (event: MidiActivity) => void;
+  onClockPulse: (timestamp: number) => void;
   onClockTempo: (tempo: number) => void;
+  onClockStart: () => void;
+  onClockContinue: () => void;
+  onClockStop: () => void;
   getChannels: () => Channel[];
 };
 
@@ -49,6 +56,9 @@ export class MidiManager {
   private notifyStatus: (status: MidiStatus) => void;
   private nrpnByChannel = new Map<number, { msb: number | null; lsb: number | null }>();
   private clockTimestamps: number[] = [];
+  private smoothedClockTempo: number | null = null;
+  private inputChannel: number | null = 1;
+  private clockInputName: string | null = null;
 
   constructor(handlers: MidiHandlers, notifyStatus: (status: MidiStatus) => void) {
     this.handlers = handlers;
@@ -71,6 +81,21 @@ export class MidiManager {
 
   setLearning(value: boolean): void {
     this.learning = value;
+  }
+
+  setInputChannel(channel: number | null): void {
+    this.inputChannel = channel !== null && channel >= 1 && channel <= 16 ? channel : null;
+  }
+
+  disconnect(): void {
+    if (!this.access) {
+      return;
+    }
+    this.access.onstatechange = null;
+    for (const input of this.access.inputs.values()) {
+      input.onmidimessage = null;
+    }
+    this.access = null;
   }
 
   private bindInputs(): void {
@@ -118,10 +143,39 @@ export class MidiManager {
     }
 
     if (status >= 0xf8) {
+      let action = "Monitor";
       if (status === 0xf8) {
-        this.handleClock(event.timeStamp);
+        if (this.clockInputName !== null && inputName !== this.clockInputName) {
+          this.handlers.onActivity(describeRealtimeMessage(inputName, status, bytes, `Ignored clock from ${inputName}`));
+          return;
+        }
+        const clockTimestamp = this.handleClock(event.timeStamp);
+        this.handlers.onClockPulse(clockTimestamp);
+        action = "Clock tempo";
+      } else if (status === 0xfa) {
+        this.clockInputName = inputName;
+        this.resetClock();
+        this.handlers.onClockStart();
+        action = "Start sequencer";
+      } else if (status === 0xfb) {
+        this.clockInputName ??= inputName;
+        if (inputName !== this.clockInputName) {
+          this.handlers.onActivity(describeRealtimeMessage(inputName, status, bytes, `Ignored transport from ${inputName}`));
+          return;
+        }
+        this.resetClock();
+        this.handlers.onClockContinue();
+        action = "Continue sequencer";
+      } else if (status === 0xfc) {
+        if (this.clockInputName !== null && inputName !== this.clockInputName) {
+          this.handlers.onActivity(describeRealtimeMessage(inputName, status, bytes, `Ignored transport from ${inputName}`));
+          return;
+        }
+        this.resetClock();
+        this.handlers.onClockStop();
+        action = "Stop sequencer";
       }
-      this.handlers.onActivity(describeRealtimeMessage(inputName, status, bytes));
+      this.handlers.onActivity(describeRealtimeMessage(inputName, status, bytes, action));
       return;
     }
 
@@ -129,6 +183,12 @@ export class MidiManager {
     const midiChannel = (status & 0x0f) + 1;
     const channels = this.handlers.getChannels();
     const activity = describeMidiMessage(inputName, command, midiChannel, data1, data2, bytes);
+
+    if (status < 0xf0 && this.inputChannel !== null && midiChannel !== this.inputChannel) {
+      activity.action = `Ignored (listening on Ch ${this.inputChannel})`;
+      this.handlers.onActivity(activity);
+      return;
+    }
 
     if (command === 0x90 && data2 > 0) {
       const message: MidiLearnMessage = { type: "note", note: data1, velocity: data2 };
@@ -182,6 +242,24 @@ export class MidiManager {
         return;
       }
       const control = createCcControl(data1, data2);
+      if (data1 === 25 || data1 === 26) {
+        const envelopeActions = this.handlers.onEnvelopeControl(control);
+        activity.action = envelopeActions.join("; ");
+        this.handlers.onActivity(activity);
+        return;
+      }
+      if (data1 === 36) {
+        const sendActions = this.handlers.onSendControl(control);
+        activity.action = sendActions.join("; ");
+        this.handlers.onActivity(activity);
+        return;
+      }
+      const fxParamActions = this.handlers.onFxParamControl(control);
+      if (fxParamActions) {
+        activity.action = fxParamActions.join("; ");
+        this.handlers.onActivity(activity);
+        return;
+      }
       const transportActions = this.handlers.onTransportControl(control);
       const channel = channels.find((item) => item.levelControlKey === control.key || item.levelCc === data1);
       if (channel) {
@@ -237,25 +315,57 @@ export class MidiManager {
     return false;
   }
 
-  private handleClock(timestamp: number): void {
+  private handleClock(timestamp: number): number {
+    const previousTimestamp = this.clockTimestamps.at(-1);
+    if (!Number.isFinite(timestamp) || timestamp <= (previousTimestamp ?? -1)) {
+      timestamp = performance.now();
+    }
+
+    if (previousTimestamp !== undefined && timestamp - previousTimestamp > 1000) {
+      this.resetClock();
+    }
+
     this.clockTimestamps.push(timestamp);
-    this.clockTimestamps = this.clockTimestamps.slice(-24);
+    this.clockTimestamps = this.clockTimestamps.slice(-48);
 
     if (this.clockTimestamps.length < 12) {
-      return;
+      return timestamp;
     }
 
-    const first = this.clockTimestamps[0];
-    const last = this.clockTimestamps[this.clockTimestamps.length - 1];
-    const averagePulseMs = (last - first) / (this.clockTimestamps.length - 1);
-    if (averagePulseMs <= 0) {
-      return;
+    const recentTimestamps = this.clockTimestamps.slice(-25);
+    const sortedIntervals = recentTimestamps
+      .slice(1)
+      .map((value, index) => value - recentTimestamps[index])
+      .filter((interval) => interval >= 60_000 / (600 * 24) && interval <= 60_000 / (10 * 24))
+      .sort((left, right) => left - right);
+    if (sortedIntervals.length < 8) {
+      return timestamp;
     }
 
-    const bpm = 60_000 / (averagePulseMs * 24);
-    if (bpm >= 40 && bpm <= 260) {
-      this.handlers.onClockTempo(bpm);
+    const trimCount = Math.floor(sortedIntervals.length * 0.15);
+    const stableIntervals = sortedIntervals.slice(trimCount, sortedIntervals.length - trimCount);
+    const averagePulseMs = stableIntervals.reduce((sum, interval) => sum + interval, 0) / stableIntervals.length;
+    const stableBpm = 60_000 / (averagePulseMs * 24);
+    const shortTimestamps = this.clockTimestamps.slice(-7);
+    const shortPulseMs = (shortTimestamps.at(-1)! - shortTimestamps[0]) / (shortTimestamps.length - 1);
+    const shortBpm = 60_000 / (shortPulseMs * 24);
+    const previousTempo = this.smoothedClockTempo;
+    const tempoChanged = previousTempo !== null && Math.abs(shortBpm - previousTempo) > 2.5;
+    const targetTempo = tempoChanged ? shortBpm : stableBpm;
+
+    if (targetTempo >= 10 && targetTempo <= 600) {
+      this.smoothedClockTempo = previousTempo === null
+        ? targetTempo
+        : previousTempo + (targetTempo - previousTempo) * (tempoChanged ? 0.35 : 0.08);
+      this.handlers.onClockTempo(this.smoothedClockTempo);
     }
+
+    return timestamp;
+  }
+
+  private resetClock(): void {
+    this.clockTimestamps = [];
+    this.smoothedClockTempo = null;
   }
 }
 
@@ -298,7 +408,7 @@ function describeMidiMessage(
     };
 }
 
-function describeRealtimeMessage(inputName: string, status: number, bytes: number[]): MidiActivity {
+function describeRealtimeMessage(inputName: string, status: number, bytes: number[], action: string): MidiActivity {
   const names: Record<number, string> = {
     0xf8: "Timing clock",
     0xfa: "Start",
@@ -317,7 +427,7 @@ function describeRealtimeMessage(inputName: string, status: number, bytes: numbe
     data1: status,
     data2: 0,
     label: names[status] ?? `Status ${status}`,
-    action: status === 0xf8 ? "Clock tempo" : "Monitor",
+    action,
     raw: formatRawBytes(bytes)
   };
 }

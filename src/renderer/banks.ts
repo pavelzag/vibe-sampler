@@ -9,6 +9,18 @@ const tr909SampleUrls = import.meta.glob("../../samples/Roland TR-909/*.WAV", {
   import: "default"
 }) as SampleModuleMap;
 
+const tr808SampleUrls = import.meta.glob("../../samples/Roland TR-808/**/*.{WAV,wav}", {
+  eager: true,
+  query: "?url",
+  import: "default"
+}) as SampleModuleMap;
+
+const linnSampleUrls = import.meta.glob("../../samples/linndrum/*.{WAV,wav}", {
+  eager: true,
+  query: "?url",
+  import: "default"
+}) as SampleModuleMap;
+
 export type BankSlot = {
   channelName: string;
   fileName: string;
@@ -35,6 +47,34 @@ export const soundBanks: SoundBank[] = [
       { channelName: "Rim", fileName: "RIM127.WAV", label: "909 Rimshot" },
       { channelName: "Ride", fileName: "RIDED6.WAV", label: "909 Ride" }
     ]
+  },
+  {
+    id: "roland-tr-808",
+    name: "Roland TR-808",
+    slots: [
+      { channelName: "Kick", fileName: "BD/BD5000.WAV", label: "808 Bass Drum" },
+      { channelName: "Snare", fileName: "SD/SD5000.WAV", label: "808 Snare" },
+      { channelName: "Clap", fileName: "CL/CL.WAV", label: "808 Clap" },
+      { channelName: "Hat", fileName: "CH/CH.WAV", label: "808 Closed Hat" },
+      { channelName: "Open Hat", fileName: "OH/OH50.WAV", label: "808 Open Hat" },
+      { channelName: "Tom", fileName: "MT/MT50.WAV", label: "808 Mid Tom" },
+      { channelName: "Rim", fileName: "RS/RS.WAV", label: "808 Rimshot" },
+      { channelName: "Ride", fileName: "CY/CY5000.WAV", label: "808 Cymbal" }
+    ]
+  },
+  {
+    id: "linndrum",
+    name: "LinnDrum",
+    slots: [
+      { channelName: "Kick", fileName: "kick.wav", label: "Linn Kick" },
+      { channelName: "Snare", fileName: "sd.wav", label: "Linn Snare" },
+      { channelName: "Clap", fileName: "clap.wav", label: "Linn Clap" },
+      { channelName: "Hat", fileName: "chh.wav", label: "Linn Closed Hat" },
+      { channelName: "Open Hat", fileName: "chhs.wav", label: "Linn Open Hat" },
+      { channelName: "Tom", fileName: "tom.wav", label: "Linn Tom" },
+      { channelName: "Rim", fileName: "cowb.wav", label: "Linn Cowbell" },
+      { channelName: "Ride", fileName: "ride.wav", label: "Linn Ride" }
+    ]
   }
 ];
 
@@ -46,15 +86,17 @@ export async function loadSoundBank(engine: SamplerEngine, bankId: string): Prom
     throw new Error(`Unknown sound bank: ${bankId}`);
   }
 
+  const sampleUrls = getSampleUrls(bankId);
+
   logInfo("Sound bank sample manifest resolved", {
     bankId,
-    availableSampleCount: Object.keys(tr909SampleUrls).length,
+    availableSampleCount: Object.keys(sampleUrls).length,
     requestedSamples: bank.slots.map((slot) => slot.fileName)
   });
 
   return Promise.all(
     bank.slots.map(async (slot) => {
-      const url = findSampleUrl(slot.fileName);
+      const url = findSampleUrl(sampleUrls, slot.fileName);
       logInfo("Fetching bundled sample", { fileName: slot.fileName, url });
       const response = await fetch(url);
       if (!response.ok) {
@@ -80,8 +122,20 @@ export function applyBankToChannels(channels: Channel[], bankId: string, samples
   }));
 }
 
-function findSampleUrl(fileName: string): string {
-  const entry = Object.entries(tr909SampleUrls).find(([path]) => path.endsWith(`/${fileName}`));
+function getSampleUrls(bankId: string): SampleModuleMap {
+  if (bankId === "roland-tr-808") {
+    return tr808SampleUrls;
+  }
+
+  if (bankId === "linndrum") {
+    return linnSampleUrls;
+  }
+
+  return tr909SampleUrls;
+}
+
+function findSampleUrl(sampleUrls: SampleModuleMap, fileName: string): string {
+  const entry = Object.entries(sampleUrls).find(([path]) => path.endsWith(`/${fileName}`));
   if (!entry) {
     throw new Error(`Missing bundled sample: ${fileName}`);
   }

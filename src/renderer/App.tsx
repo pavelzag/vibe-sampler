@@ -13,7 +13,18 @@ import {
   Scissors,
   Wand2
 } from "lucide-react";
-import { Channel, Sample, SamplerEngine, createChannels, getEnvelopeDuration, midiNoteName } from "./audio";
+import {
+  Channel,
+  FxParams,
+  FxSendTarget,
+  Sample,
+  SamplerEngine,
+  createChannels,
+  createDefaultFxParams,
+  formatFxParamValue,
+  getEnvelopeDuration,
+  midiNoteName
+} from "./audio";
 import { applyBankToChannels, defaultBankId, loadSoundBank, soundBanks } from "./banks";
 import { installRendererErrorLogging, logError, logInfo, logWarn } from "./logger";
 import { MidiActivity, MidiControlMessage, MidiManager, MidiStatus } from "./midi";
@@ -47,6 +58,37 @@ const defaultTransportControls = {
 const defaultVolumeControlNumbers = [35, 37, 39, 40, 43, 44, 17, 24];
 type TransportBindTarget = "swing" | "master";
 type StoredControl = { key: string; label: string } | null;
+const fxSendTargets: FxSendTarget[] = ["distortion", "reverb", "delay", "bitcrusher"];
+const fxSendLabels: Record<FxSendTarget, string> = {
+  distortion: "Dist",
+  reverb: "Verb",
+  delay: "Delay",
+  bitcrusher: "Crush"
+};
+const fxOverrideCcKeys = ["cc:35", "cc:39", "cc:43"];
+const midiChannelOptions = Array.from({ length: 16 }, (_, index) => index + 1);
+const fxParamDefs: Record<FxSendTarget, { key: string; label: string }[]> = {
+  distortion: [
+    { key: "drive", label: "Drive" },
+    { key: "tone", label: "Tone" },
+    { key: "level", label: "Level" }
+  ],
+  reverb: [
+    { key: "decay", label: "Decay" },
+    { key: "damping", label: "Damping" },
+    { key: "mix", label: "Mix" }
+  ],
+  delay: [
+    { key: "time", label: "Time" },
+    { key: "feedback", label: "Feedback" },
+    { key: "mix", label: "Mix" }
+  ],
+  bitcrusher: [
+    { key: "bits", label: "Bits" },
+    { key: "rate", label: "Rate" },
+    { key: "mix", label: "Mix" }
+  ]
+};
 
 declare global {
   interface Window {
@@ -87,12 +129,16 @@ function App(): React.JSX.Element {
   const [swingControl, setSwingControl] = useState<StoredControl>(defaultTransportControls.swing);
   const [masterControl, setMasterControl] = useState<StoredControl>(defaultTransportControls.master);
   const [transportBindTarget, setTransportBindTarget] = useState<TransportBindTarget | null>(null);
+  const [selectedFxSendTarget, setSelectedFxSendTarget] = useState<FxSendTarget>("reverb");
+  const [fxParams, setFxParams] = useState<FxParams>(createDefaultFxParams);
+  const [fxCcOverride, setFxCcOverride] = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
   const [selectedPatternCell, setSelectedPatternCell] = useState<{ channelId: number; step: number } | null>(null);
   const [channelHitTicks, setChannelHitTicks] = useState(() => Array.from({ length: 8 }, () => 0));
   const [audioLatencyMs, setAudioLatencyMs] = useState(0);
   const [midiMonitorEnabled, setMidiMonitorEnabled] = useState(true);
   const [midiEvents, setMidiEvents] = useState<MidiActivity[]>([]);
+  const [midiInputChannel, setMidiInputChannel] = useState<number | null>(1);
   const [keyLearnIndex, setKeyLearnIndex] = useState<number | null>(null);
   const [midiStatus, setMidiStatus] = useState<MidiStatus>({
     supported: true,
@@ -112,17 +158,32 @@ function App(): React.JSX.Element {
   const recordingTouchedChannelsRef = useRef<Set<number>>(new Set());
   const playingStepRef = useRef(0);
   const tempoRef = useRef(tempo);
+  const tempoUiRef = useRef(tempo);
+  const lastTempoUiUpdateRef = useRef(0);
   const swingRef = useRef(swing);
   const keyLearnIndexRef = useRef<number | null>(null);
   const volumeControlMapRef = useRef<StoredControl[]>(Array.from({ length: 8 }, () => null));
   const swingControlRef = useRef<StoredControl>(defaultTransportControls.swing);
   const masterControlRef = useRef<StoredControl>(defaultTransportControls.master);
   const transportBindTargetRef = useRef<TransportBindTarget | null>(null);
+  const selectedFxSendTargetRef = useRef<FxSendTarget>("reverb");
+  const fxCcOverrideRef = useRef(false);
+  const engineChannelMixRef = useRef(
+    channels.map((channel) => ({
+      level: channel.level,
+      pan: channel.pan,
+      fxSends: { ...channel.fxSends }
+    }))
+  );
 
   const activeChannel = channels[activeChannelId];
+  const activeSampleDuration = activeChannel.sample?.buffer.duration ?? 0;
+  const activeTrimDuration = activeChannel.sample
+    ? Math.max(0.02, activeChannel.sample.trimEnd - activeChannel.sample.trimStart)
+    : 0.02;
   const waveform = useMemo(
     () => (activeChannel.sample ? engine.renderWaveform(activeChannel.sample, 180) : []),
-    [activeChannel.sample]
+    [activeChannel.sample?.buffer]
   );
 
   useEffect(() => {
@@ -134,9 +195,25 @@ function App(): React.JSX.Element {
     channelsRef.current = channels;
     volumeControlMapRef.current = channels.map((channel) => toStoredControl(channel.levelControlKey, channel.levelControlLabel));
     channels.forEach((channel) => {
-      engine.setChannelLevel(channel.id, channel.level);
-      engine.setChannelPan(channel.id, channel.pan);
+      const previous = engineChannelMixRef.current[channel.id];
+      if (!previous || previous.level !== channel.level) {
+        engine.setChannelLevel(channel.id, channel.level);
+      }
+      if (!previous || previous.pan !== channel.pan) {
+        engine.setChannelPan(channel.id, channel.pan);
+      }
+      fxSendTargets.forEach((target) => {
+        const amount = channel.fxSends?.[target] ?? 0;
+        if (!previous || previous.fxSends[target] !== amount) {
+          engine.setChannelFxSend(channel.id, target, amount);
+        }
+      });
     });
+    engineChannelMixRef.current = channels.map((channel) => ({
+      level: channel.level,
+      pan: channel.pan,
+      fxSends: { ...channel.fxSends }
+    }));
   }, [channels]);
 
   useEffect(() => {
@@ -157,6 +234,7 @@ function App(): React.JSX.Element {
 
   useEffect(() => {
     tempoRef.current = tempo;
+    tempoUiRef.current = tempo;
   }, [tempo]);
 
   useEffect(() => {
@@ -172,12 +250,76 @@ function App(): React.JSX.Element {
   }, [transportBindTarget]);
 
   useEffect(() => {
+    selectedFxSendTargetRef.current = selectedFxSendTarget;
+  }, [selectedFxSendTarget]);
+
+  useEffect(() => engine.setDistortionParams(fxParams.distortion), [fxParams.distortion]);
+  useEffect(() => engine.setReverbParams(fxParams.reverb), [fxParams.reverb]);
+  useEffect(() => engine.setDelayParams(fxParams.delay), [fxParams.delay]);
+  useEffect(() => engine.setBitcrusherParams(fxParams.bitcrusher), [fxParams.bitcrusher]);
+
+  useEffect(() => {
     keyLearnIndexRef.current = keyLearnIndex;
   }, [keyLearnIndex]);
 
   const updateChannel = useCallback((channelId: number, updater: (channel: Channel) => Channel) => {
     setChannels((current) => current.map((channel) => (channel.id === channelId ? updater(channel) : channel)));
   }, []);
+
+  const updateChannelFxSend = useCallback((channelId: number, target: FxSendTarget, amount: number) => {
+    const next = Math.max(0, Math.min(1, amount));
+    engine.setChannelFxSend(channelId, target, next);
+    updateChannel(channelId, (channel) => ({
+      ...channel,
+      fxSends: {
+        ...channel.fxSends,
+        [target]: next
+      }
+    }));
+  }, [updateChannel]);
+
+  const updateFxParam = useCallback((target: FxSendTarget, param: string, amount: number) => {
+    const next = Math.max(0, Math.min(1, amount));
+    setFxParams((current) => ({
+      ...current,
+      [target]: {
+        ...current[target],
+        [param]: next
+      }
+    }));
+  }, []);
+
+  const toggleFxCcOverride = useCallback(() => {
+    const next = !fxCcOverrideRef.current;
+    fxCcOverrideRef.current = next;
+    setFxCcOverride(next);
+    setMessage(
+      next
+        ? "CC 35 / 39 / 43 now control the selected FX parameters"
+        : "CC 35 / 39 / 43 returned to their channel level assignments"
+    );
+  }, []);
+
+  const bindFxParamControl = useCallback(
+    (control: MidiControlMessage): string[] | null => {
+      if (!fxCcOverrideRef.current) {
+        return null;
+      }
+
+      const paramIndex = fxOverrideCcKeys.indexOf(control.key);
+      if (paramIndex === -1) {
+        return null;
+      }
+
+      const target = selectedFxSendTargetRef.current;
+      const def = fxParamDefs[target][paramIndex];
+      updateFxParam(target, def.key, control.value);
+      const label = `${fxSendLabels[target]} ${def.label}`;
+      setMessage(`${label} ${Math.round(control.value * 100)}%`);
+      return [label];
+    },
+    [updateFxParam]
+  );
 
   useEffect(() => {
     const transport = new TransportScheduler({
@@ -219,7 +361,8 @@ function App(): React.JSX.Element {
     }
 
     try {
-      const controls = normalizeStoredControls(JSON.parse(stored));
+      const defaults = defaultVolumeControlsAsStored();
+      const controls = normalizeStoredControls(JSON.parse(stored)).map((control, index) => control ?? defaults[index]);
       volumeControlMapRef.current = controls;
       setChannels((current) =>
         current.map((channel, index) => ({
@@ -243,10 +386,11 @@ function App(): React.JSX.Element {
 
     try {
       const controls = JSON.parse(stored) as { swing?: StoredControl; master?: StoredControl };
-      swingControlRef.current = normalizeStoredControl(controls.swing);
-      masterControlRef.current = normalizeStoredControl(controls.master);
+      swingControlRef.current = sanitizeTransportControl(normalizeStoredControl(controls.swing), defaultTransportControls.swing);
+      masterControlRef.current = sanitizeTransportControl(normalizeStoredControl(controls.master), defaultTransportControls.master);
       setSwingControl(swingControlRef.current);
       setMasterControl(masterControlRef.current);
+      saveTransportMap();
     } catch {
       localStorage.removeItem(transportMapStorageKey);
     }
@@ -376,6 +520,13 @@ function App(): React.JSX.Element {
         return;
       }
 
+      if (event.code === "KeyN") {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleFxCcOverride();
+        return;
+      }
+
       const triggerChannelId = triggerKeyCodes.indexOf(event.code);
       if (triggerChannelId !== -1) {
         event.preventDefault();
@@ -397,7 +548,7 @@ function App(): React.JSX.Element {
 
     window.addEventListener("keydown", handleChannelKey, { capture: true });
     return () => window.removeEventListener("keydown", handleChannelKey, { capture: true });
-  }, [recordPatternHit, triggerChannel, updateChannel]);
+  }, [recordPatternHit, triggerChannel, toggleFxCcOverride]);
 
   useEffect(() => {
     const updateLatency = () => setAudioLatencyMs(engine.getLatencyMs());
@@ -413,15 +564,68 @@ function App(): React.JSX.Element {
     [updateChannel]
   );
 
+  const bindSendControl = useCallback(
+    (control: MidiControlMessage): string[] => {
+      const channelId = activeChannelIdRef.current;
+      const target = selectedFxSendTargetRef.current;
+      const next = control.value;
+      updateChannelFxSend(channelId, target, next);
+      const channelName = channelsRef.current[channelId]?.name ?? "channel";
+      const label = fxSendLabels[target];
+      setMessage(`${label} send assigned on ${channelName}`);
+      return [`${label} send ${channelName}`];
+    },
+    [updateChannelFxSend]
+  );
+
+  const bindEnvelopeControl = useCallback(
+    (control: MidiControlMessage): string[] => {
+      const channelId = activeChannelIdRef.current;
+      const channel = channelsRef.current[channelId];
+      if (!channel?.sample) {
+        return [];
+      }
+
+      const duration = channel.sample.buffer.duration;
+      const value = mapEnvelopeKnobRange(control.value);
+      const label = channel.name;
+
+      if (control.key === "cc:25") {
+        const attack = clamp(value * duration, 0, duration);
+        updateEnvelope(channelId, {
+          ...channel.envelope,
+          attack
+        });
+        setMessage(`Attack moved on ${label}`);
+        return [`Attack ${label}`];
+      }
+
+      if (control.key === "cc:26") {
+        const attack = channel.envelope.attack;
+        const release = clamp(attack + value * (duration - attack), 0, duration);
+        updateEnvelope(channelId, {
+          ...channel.envelope,
+          release
+        });
+        setMessage(`Release moved on ${label}`);
+        return [`Release ${label}`];
+      }
+
+      return [];
+    },
+    [updateEnvelope]
+  );
+
   const bindTransportControl = useCallback(
     (control: MidiControlMessage): string[] => {
       const level = control.value;
       const storedControl = toStoredControl(control.key, control.label);
       const actions: string[] = [];
 
-      if (control.key === "cc:24") {
+      const levelChannel = channelsRef.current.find((channel) => channel.levelControlKey === control.key);
+      if (levelChannel) {
         if (transportBindTargetRef.current) {
-          setMessage("CC 24 is reserved for Ride level.");
+          setMessage(`${control.label} is reserved for ${levelChannel.name} level.`);
         }
         return actions;
       }
@@ -471,15 +675,39 @@ function App(): React.JSX.Element {
             ...channel,
             level
           })),
+        onSendControl: bindSendControl,
+        onEnvelopeControl: bindEnvelopeControl,
+        onFxParamControl: bindFxParamControl,
         onTransportControl: bindTransportControl,
         onLevelControlDetected: bindDetectedLevelControl,
         onMute: (channelId, muted) => updateChannel(channelId, (channel) => ({ ...channel, muted })),
         onLearn: () => undefined,
+        onClockPulse: (timestamp) => {
+          transportRef.current?.receiveExternalClock(timestamp);
+        },
         onClockTempo: (clockTempo) => {
-          const nextTempo = Math.round(clockTempo);
-          if (Math.abs(nextTempo - tempoRef.current) >= 1) {
+          const nextTempo = quantizeTempo(clockTempo);
+          tempoRef.current = nextTempo;
+          const now = performance.now();
+          if (now - lastTempoUiUpdateRef.current >= 250 && Math.abs(nextTempo - tempoUiRef.current) >= 0.1) {
+            lastTempoUiUpdateRef.current = now;
+            tempoUiRef.current = nextTempo;
             setTempo(nextTempo);
           }
+        },
+        onClockStart: () => {
+          engine.resumeSoon();
+          transportRef.current?.startExternal();
+          setMessage("Synced to external MIDI clock");
+        },
+        onClockContinue: () => {
+          engine.resumeSoon();
+          transportRef.current?.continueExternal();
+          setMessage("Continuing on external MIDI clock");
+        },
+        onClockStop: () => {
+          transportRef.current?.stop();
+          setMessage("Stopped by MIDI clock");
         },
         onActivity: (event) => {
           if (keyLearnIndexRef.current !== null && event.kind === "Note on") {
@@ -510,7 +738,13 @@ function App(): React.JSX.Element {
       logWarn("MIDI unavailable", error);
       setMessage(`MIDI unavailable: ${error instanceof Error ? error.message : "unknown error"}`);
     });
-  }, [bindDetectedLevelControl, bindTransportControl, midiMonitorEnabled, triggerChannel, updateChannel]);
+    return () => {
+      midi.disconnect();
+      if (midiRef.current === midi) {
+        midiRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     void loadBank(defaultBankId);
@@ -591,6 +825,23 @@ function App(): React.JSX.Element {
     }
 
     setSample(activeChannelId, next);
+  }
+
+  function adjustEnvelopeValue(field: "attack" | "release", rawValue: number): void {
+    const minimumGap = 0.02;
+    if (field === "attack") {
+      const attack = clamp(rawValue, 0, Math.max(0, activeTrimDuration - minimumGap));
+      updateEnvelope(activeChannelId, {
+        attack,
+        release: clamp(Math.max(activeChannel.envelope.release, attack + minimumGap), minimumGap, activeTrimDuration)
+      });
+      return;
+    }
+
+    updateEnvelope(activeChannelId, {
+      ...activeChannel.envelope,
+      release: clamp(rawValue, activeChannel.envelope.attack + minimumGap, activeTrimDuration)
+    });
   }
 
   function toggleStep(channelId: number, step: number): void {
@@ -748,7 +999,14 @@ function App(): React.JSX.Element {
           </button>
           <label className="tempo">
             <span>BPM</span>
-            <input min="60" max="190" type="number" value={tempo} onChange={(event) => setTempo(Number(event.target.value))} />
+            <input
+              min="10"
+              max="600"
+              step="0.5"
+              type="number"
+              value={tempo}
+              onChange={(event) => setTempo(quantizeTempo(Number(event.target.value)))}
+            />
           </label>
           <label className="tempo">
             <span>Swing</span>
@@ -770,6 +1028,26 @@ function App(): React.JSX.Element {
               onChange={(event) => setMasterLevel(Math.max(0, Math.min(100, Number(event.target.value))) / 100)}
             />
           </label>
+          <label className="midi-channel-select">
+            <span>MIDI</span>
+            <select
+              aria-label="MIDI input channel"
+              value={midiInputChannel ?? "all"}
+              onChange={(event) => {
+                const channel = event.target.value === "all" ? null : Number(event.target.value);
+                setMidiInputChannel(channel);
+                midiRef.current?.setInputChannel(channel);
+                setMessage(channel === null ? "Listening on all MIDI channels" : `Listening on MIDI channel ${channel}`);
+              }}
+            >
+              <option value="all">All channels</option>
+              {midiChannelOptions.map((channel) => (
+                <option value={channel} key={channel}>
+                  Channel {channel}
+                </option>
+              ))}
+            </select>
+          </label>
           <div className="midi-pill">
             <Radio size={16} />
             {midiStatus.connectedInputs.length ? midiStatus.connectedInputs.join(", ") : midiStatus.supported ? "No MIDI input" : "MIDI unsupported"}
@@ -783,7 +1061,7 @@ function App(): React.JSX.Element {
             <button
               className={channel.id === activeChannelId ? "channel selected" : "channel"}
               key={channel.id}
-              onPointerDown={() => triggerChannel(channel.id, 1, true, true)}
+              onClick={() => setActiveChannelId(channel.id)}
               style={{ "--level": channel.muted ? 0 : channel.level } as React.CSSProperties}
             >
               <span className="channel-hit" key={channelHitTicks[channel.id]} />
@@ -810,52 +1088,77 @@ function App(): React.JSX.Element {
               </button>
             </div>
 
-            <div className="waveform" aria-label="Sample waveform">
-              {waveform.length ? (
-                waveform.map((point, index) => (
-                  <span key={index} style={{ height: `${Math.max(4, point * 100)}%` }} />
-                ))
-              ) : (
-                <div className="empty-wave">Record from the microphone to fill this channel</div>
-              )}
-            </div>
+            <WaveformEditor
+              sample={activeChannel.sample}
+              waveform={waveform}
+              envelope={activeChannel.envelope}
+              onTrimChange={adjustTrim}
+              onEnvelopeChange={(envelope) => updateEnvelope(activeChannelId, envelope)}
+            />
 
-            <div className="trim-row">
-              <label>
-                <span>Start</span>
-                <input
-                  type="range"
-                  min="0"
-                  max={activeChannel.sample?.buffer.duration || 1}
-                  step="0.01"
-                  value={activeChannel.sample?.trimStart || 0}
-                  onChange={(event) => adjustTrim("trimStart", Number(event.target.value))}
-                />
-              </label>
-              <label>
-                <span>End</span>
-                <input
-                  type="range"
-                  min="0"
-                  max={activeChannel.sample?.buffer.duration || 1}
-                  step="0.01"
-                  value={activeChannel.sample?.trimEnd || 0}
-                  onChange={(event) => adjustTrim("trimEnd", Number(event.target.value))}
-                />
-              </label>
-            </div>
-
-            <div className="envelope-panel">
-              <div className="section-title">
-                <h3>ADSR</h3>
-                <span>Amplitude envelope</span>
-              </div>
-              <EnvelopeGraph
-                envelope={activeChannel.envelope}
-                sampleDuration={activeChannel.sample?.buffer.duration ?? 1.5}
-                onChange={(envelope) => updateEnvelope(activeChannelId, envelope)}
+            <fieldset className="sample-values" disabled={!activeChannel.sample}>
+              <legend>Sample values</legend>
+              <ParameterSlider
+                label="Level"
+                min={0}
+                max={100}
+                step={1}
+                value={Math.round(activeChannel.level * 100)}
+                format={(value) => `${Math.round(value)}%`}
+                onPreview={(value) => engine.setChannelLevel(activeChannelId, value / 100)}
+                onCommit={(value) =>
+                  updateChannel(activeChannelId, (channel) => ({ ...channel, level: value / 100 }))
+                }
               />
-            </div>
+              <ParameterSlider
+                label="Pan"
+                min={-100}
+                max={100}
+                step={1}
+                value={Math.round(activeChannel.pan * 100)}
+                format={(value) => formatPan(value / 100)}
+                onPreview={(value) => engine.setChannelPan(activeChannelId, value / 100)}
+                onCommit={(value) =>
+                  updateChannel(activeChannelId, (channel) => ({ ...channel, pan: value / 100 }))
+                }
+              />
+              <ParameterSlider
+                label="Start"
+                min={0}
+                max={Math.max(0, activeSampleDuration - 0.02)}
+                step={0.001}
+                value={activeChannel.sample?.trimStart ?? 0}
+                format={(value) => `${value.toFixed(3)}s`}
+                onCommit={(value) => adjustTrim("trimStart", value)}
+              />
+              <ParameterSlider
+                label="End"
+                min={0.02}
+                max={Math.max(0.02, activeSampleDuration)}
+                step={0.001}
+                value={activeChannel.sample?.trimEnd ?? 0.02}
+                format={(value) => `${value.toFixed(3)}s`}
+                onCommit={(value) => adjustTrim("trimEnd", value)}
+              />
+              <ParameterSlider
+                label="Attack"
+                min={0}
+                max={Math.max(0, activeTrimDuration - 0.02)}
+                step={0.001}
+                value={Math.min(activeChannel.envelope.attack, Math.max(0, activeTrimDuration - 0.02))}
+                format={(value) => `${value.toFixed(3)}s`}
+                onCommit={(value) => adjustEnvelopeValue("attack", value)}
+              />
+              <ParameterSlider
+                label="Release"
+                min={Math.min(activeTrimDuration, activeChannel.envelope.attack + 0.02)}
+                max={activeTrimDuration}
+                step={0.001}
+                value={Math.min(activeChannel.envelope.release, activeTrimDuration)}
+                format={(value) => `${value.toFixed(3)}s`}
+                onCommit={(value) => adjustEnvelopeValue("release", value)}
+              />
+            </fieldset>
 
             <div className="tool-row">
               <button onClick={() => triggerChannel(activeChannelId, 1, true)} disabled={!activeChannel.sample}>
@@ -874,6 +1177,72 @@ function App(): React.JSX.Element {
                 <Eraser size={16} />
                 Clear
               </button>
+            </div>
+
+            <div className="fx-panel">
+              <div className="section-title">
+                <h3>FX Sends</h3>
+                <span>
+                  {fxCcOverride
+                    ? `CC 35 / 39 / 43 control ${fxSendLabels[selectedFxSendTarget]} ${fxParamDefs[selectedFxSendTarget]
+                        .map((def) => def.label)
+                        .join(" / ")}`
+                    : "CC 36 controls the selected send on the selected channel"}
+                </span>
+                <button
+                  className={fxCcOverride ? "fx-cc-toggle active" : "fx-cc-toggle"}
+                  onClick={toggleFxCcOverride}
+                  type="button"
+                >
+                  {fxCcOverride ? "Knobs → FX (N)" : "Knobs → Levels (N)"}
+                </button>
+              </div>
+              <div className="send-targets" role="tablist" aria-label="Selected FX send target">
+                {fxSendTargets.map((target) => (
+                  <button
+                    key={target}
+                    className={selectedFxSendTarget === target ? "selected" : ""}
+                    onClick={() => setSelectedFxSendTarget(target)}
+                    type="button"
+                  >
+                    {fxSendLabels[target]}
+                  </button>
+                ))}
+              </div>
+              <label className="fx-send-slider">
+                <span>{activeChannel.name} {fxSendLabels[selectedFxSendTarget]}</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value={Math.round(activeChannel.fxSends[selectedFxSendTarget] * 100)}
+                  onChange={(event) =>
+                    updateChannelFxSend(activeChannelId, selectedFxSendTarget, Number(event.target.value) / 100)
+                  }
+                />
+              </label>
+              <div className="fx-params">
+                {fxParamDefs[selectedFxSendTarget].map((def) => {
+                  const value = (fxParams[selectedFxSendTarget] as Record<string, number>)[def.key];
+                  return (
+                    <label className="fx-param-slider" key={def.key}>
+                      <span>{def.label}</span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        step="1"
+                        value={Math.round(value * 100)}
+                        onChange={(event) =>
+                          updateFxParam(selectedFxSendTarget, def.key, Number(event.target.value) / 100)
+                        }
+                      />
+                      <em>{formatFxParamValue(selectedFxSendTarget, def.key, value)}</em>
+                    </label>
+                  );
+                })}
+              </div>
             </div>
           </div>
 
@@ -910,6 +1279,53 @@ function App(): React.JSX.Element {
                     <MicOff size={13} />
                     {channel.muted ? "Muted" : "Mute"}
                   </button>
+                  <label title={`Level ${Math.round(channel.level * 100)}%`}>
+                    <span>Vol</span>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      step="1"
+                      value={Math.round(channel.level * 100)}
+                      onChange={(event) =>
+                        updateChannel(channel.id, (item) => ({
+                          ...item,
+                          level: Number(event.target.value) / 100
+                        }))
+                      }
+                    />
+                  </label>
+                  <label title={`Pan ${formatPan(channel.pan)}`}>
+                    <span>Pan</span>
+                    <input
+                      type="range"
+                      min="-100"
+                      max="100"
+                      step="1"
+                      value={Math.round(channel.pan * 100)}
+                      onChange={(event) =>
+                        updateChannel(channel.id, (item) => ({
+                          ...item,
+                          pan: Number(event.target.value) / 100
+                        }))
+                      }
+                    />
+                  </label>
+                  <div className="fx-sends">
+                    {fxSendTargets.map((target) => (
+                      <label key={target}>
+                        <span>{fxSendLabels[target]}</span>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          step="1"
+                          value={Math.round((channel.fxSends?.[target] ?? 0) * 100)}
+                          onChange={(event) => updateChannelFxSend(channel.id, target, Number(event.target.value) / 100)}
+                        />
+                      </label>
+                    ))}
+                  </div>
                 </div>
               ))}
             </div>
@@ -1024,12 +1440,68 @@ function App(): React.JSX.Element {
         <span>Command+Up/Down: recording row</span>
         <span>Play keys: a s d f g h j k</span>
         <span>Mute keys: q w e r t y u i</span>
+        <span>CC 25 attack, CC 26 release, CC 36 FX sends</span>
+        <span>N: toggle CC 35/39/43 between channel levels and FX parameters</span>
         <span>Attack controls swing, Master Volume controls master amplitude after binding</span>
         <span>Audio latency: {audioLatencyMs ? `${audioLatencyMs.toFixed(1)} ms` : "unknown"}</span>
       </footer>
     </main>
   );
 }
+
+const ParameterSlider = React.memo(function ParameterSlider({
+  label,
+  min,
+  max,
+  step,
+  value,
+  format,
+  onPreview,
+  onCommit
+}: {
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  value: number;
+  format: (value: number) => string;
+  onPreview?: (value: number) => void;
+  onCommit: (value: number) => void;
+}): React.JSX.Element {
+  const [draft, setDraft] = useState(value);
+  const draftRef = useRef(value);
+
+  useEffect(() => {
+    draftRef.current = value;
+    setDraft(value);
+  }, [value]);
+
+  const updateDraft = (nextValue: number) => {
+    draftRef.current = nextValue;
+    setDraft(nextValue);
+    onPreview?.(nextValue);
+  };
+  const commit = () => onCommit(draftRef.current);
+
+  return (
+    <label>
+      <span>{label}</span>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={draft}
+        onChange={(event) => updateDraft(Number(event.target.value))}
+        onPointerUp={commit}
+        onPointerCancel={commit}
+        onKeyUp={commit}
+        onBlur={commit}
+      />
+      <output>{format(draft)}</output>
+    </label>
+  );
+});
 
 const rootElement = document.getElementById("root");
 if (!rootElement) {
@@ -1043,56 +1515,93 @@ window.vibeSamplerRoot = root;
 root.render(<App />);
 logInfo("React app mounted");
 
-function EnvelopeGraph({
+function WaveformEditor({
+  sample,
+  waveform,
   envelope,
-  sampleDuration,
-  onChange
+  onTrimChange,
+  onEnvelopeChange
 }: {
+  sample: Sample | null;
+  waveform: number[];
   envelope: Channel["envelope"];
-  sampleDuration: number;
-  onChange: (envelope: Channel["envelope"]) => void;
+  onTrimChange: (field: "trimStart" | "trimEnd", value: number) => void;
+  onEnvelopeChange: (envelope: Channel["envelope"]) => void;
 }): React.JSX.Element {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const width = 1000;
-  const height = 260;
-  const padding = 22;
-  const graphWidth = width - padding * 2;
+  const height = 300;
+  const padding = 28;
+  const paddingX = 0;
+  const graphWidth = width - paddingX * 2;
   const graphHeight = height - padding * 2;
-  const maxSeconds = Math.max(0.25, sampleDuration, getEnvelopeDuration(envelope));
-  const attackTime = envelope.attack;
-  const decayTime = envelope.attack + envelope.decay;
-  const holdTime = envelope.attack + envelope.decay + envelope.hold;
-  const releaseTime = getEnvelopeDuration(envelope);
+  const duration = sample?.buffer.duration ?? 1;
+  const trimStart = sample?.trimStart ?? 0;
+  const trimEnd = sample?.trimEnd ?? duration;
+  const trimDuration = Math.max(0.001, trimEnd - trimStart);
+  const maxSeconds = trimDuration;
+  const attackTime = Math.min(envelope.attack, maxSeconds);
+  const releaseTime = Math.min(Math.max(attackTime, envelope.release), maxSeconds);
+  const trimStartX = timeToX(trimStart);
+  const trimEndX = timeToX(trimEnd);
 
   const points = [
-    { id: "attack", label: "A", x: timeToX(attackTime), y: ampToY(envelope.peak) },
-    { id: "decay", label: "D", x: timeToX(decayTime), y: ampToY(envelope.sustain) },
-    { id: "sustain", label: "S", x: timeToX(holdTime), y: ampToY(envelope.sustain) },
-    { id: "release", label: "R", x: timeToX(releaseTime), y: ampToY(0) }
+    { id: "attack", label: "A", x: envelopeTimeToX(attackTime), y: ampToY(1) },
+    { id: "release", label: "R", x: envelopeTimeToX(releaseTime), y: ampToY(0) }
   ] as const;
 
   const path = [
-    `M ${padding} ${ampToY(0)}`,
+    `M ${trimStartX} ${ampToY(0)}`,
     `L ${points[0].x} ${points[0].y}`,
-    `L ${points[1].x} ${points[1].y}`,
-    `L ${points[2].x} ${points[2].y}`,
-    `L ${points[3].x} ${points[3].y}`
+    `L ${points[1].x} ${points[1].y}`
   ].join(" ");
 
   function timeToX(time: number): number {
-    return padding + (time / maxSeconds) * graphWidth;
+    return paddingX + (clamp(time, 0, duration) / duration) * graphWidth;
+  }
+
+  function envelopeTimeToX(time: number): number {
+    return timeToX(trimStart + clamp(time, 0, maxSeconds));
   }
 
   function xToTime(x: number): number {
-    return ((x - padding) / graphWidth) * maxSeconds;
+    return clamp(((x - paddingX) / graphWidth) * duration, 0, duration);
+  }
+
+  function xToEnvelopeTime(x: number): number {
+    return clamp(xToTime(x) - trimStart, 0, trimDuration);
   }
 
   function ampToY(amplitude: number): number {
     return padding + (1 - amplitude) * graphHeight;
   }
 
-  function yToAmp(y: number): number {
-    return clamp(1 - (y - padding) / graphHeight, 0, 1);
+  function handleTrimPointerDown(field: "trimStart" | "trimEnd", event: React.PointerEvent<SVGElement>): void {
+    event.currentTarget.setPointerCapture(event.pointerId);
+    updateTrimFromPointer(field, event);
+  }
+
+  function handleTrimPointerMove(field: "trimStart" | "trimEnd", event: React.PointerEvent<SVGElement>): void {
+    if (event.buttons !== 1) {
+      return;
+    }
+    updateTrimFromPointer(field, event);
+  }
+
+  function updateTrimFromPointer(field: "trimStart" | "trimEnd", event: React.PointerEvent<SVGElement>): void {
+    if (!sample) {
+      return;
+    }
+
+    const svg = svgRef.current;
+    if (!svg) {
+      return;
+    }
+
+    const minGap = Math.min(0.02, sample.buffer.duration / 3);
+    const time = pointerToTime(event, svg);
+    const nextTime = field === "trimStart" ? clamp(time, 0, trimEnd - minGap) : clamp(time, trimStart + minGap, sample.buffer.duration);
+    onTrimChange(field, nextTime);
   }
 
   function handlePointerDown(pointId: (typeof points)[number]["id"], event: React.PointerEvent<SVGCircleElement>): void {
@@ -1113,51 +1622,91 @@ function EnvelopeGraph({
       return;
     }
 
-    const rect = svg.getBoundingClientRect();
-    const x = clamp(((event.clientX - rect.left) / rect.width) * width, padding, width - padding);
-    const y = clamp(((event.clientY - rect.top) / rect.height) * height, padding, height - padding);
-    const time = xToTime(x);
-    const amplitude = yToAmp(y);
+    const { x } = pointerToSvgPoint(event, svg);
+    const time = xToEnvelopeTime(x);
     const next = { ...envelope };
 
     if (pointId === "attack") {
-      next.attack = clamp(time, 0, decayTime);
-      next.peak = amplitude;
-    }
-
-    if (pointId === "decay") {
-      const clampedTime = clamp(time, attackTime, holdTime);
-      next.decay = clampedTime - next.attack;
-      next.sustain = amplitude;
-    }
-
-    if (pointId === "sustain") {
-      const clampedTime = clamp(time, decayTime, releaseTime);
-      next.hold = clampedTime - next.attack - next.decay;
-      next.sustain = amplitude;
+      next.attack = clamp(time, 0, maxSeconds);
     }
 
     if (pointId === "release") {
-      const clampedTime = clamp(time, holdTime, maxSeconds);
-      next.release = clampedTime - next.attack - next.decay - next.hold;
+      next.release = clamp(time, 0, maxSeconds);
     }
 
-    onChange(next);
+    onEnvelopeChange(next);
+  }
+
+  function pointerToSvgPoint(event: React.PointerEvent<Element>, svg: SVGSVGElement): { x: number; y: number } {
+    const rect = svg.getBoundingClientRect();
+    return {
+      x: clamp(((event.clientX - rect.left) / rect.width) * width, paddingX, width - paddingX),
+      y: clamp(((event.clientY - rect.top) / rect.height) * height, padding, height - padding)
+    };
+  }
+
+  function pointerToTime(event: React.PointerEvent<Element>, svg: SVGSVGElement): number {
+    return xToTime(pointerToSvgPoint(event, svg).x);
+  }
+
+  if (!sample || waveform.length === 0) {
+    return (
+      <div className="waveform-editor empty-wave" aria-label="Sample waveform">
+        Record from the microphone to fill this channel
+      </div>
+    );
   }
 
   return (
-    <svg className="envelope-graph" ref={svgRef} viewBox={`0 0 ${width} ${height}`} role="img" aria-label="ADSR envelope">
-      <rect className="envelope-bg" x="0" y="0" width={width} height={height} rx="8" />
-      <g className="envelope-grid-lines">
+    <svg className="waveform-editor" ref={svgRef} viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Sample waveform editor">
+      <rect className="waveform-bg" x="0" y="0" width={width} height={height} rx="8" />
+      <g className="waveform-grid-lines">
         {[0.25, 0.5, 0.75].map((line) => (
-          <line key={`h-${line}`} x1={padding} x2={width - padding} y1={padding + graphHeight * line} y2={padding + graphHeight * line} />
+          <line key={`h-${line}`} x1={paddingX} x2={width - paddingX} y1={padding + graphHeight * line} y2={padding + graphHeight * line} />
         ))}
         {[0.25, 0.5, 0.75].map((line) => (
-          <line key={`v-${line}`} y1={padding} y2={height - padding} x1={padding + graphWidth * line} x2={padding + graphWidth * line} />
+          <line key={`v-${line}`} y1={padding} y2={height - padding} x1={paddingX + graphWidth * line} x2={paddingX + graphWidth * line} />
         ))}
       </g>
-      <path className="envelope-fill" d={`${path} L ${points[3].x} ${height - padding} L ${padding} ${height - padding} Z`} />
+      <g className="waveform-bars">
+        {waveform.map((point, index) => {
+          const barWidth = graphWidth / waveform.length;
+          const x = paddingX + index * barWidth;
+          const barHeight = Math.max(4, point * graphHeight);
+          const isTrimmed = x + barWidth < trimStartX || x > trimEndX;
+          return (
+            <rect
+              className={isTrimmed ? "waveform-bar trimmed" : "waveform-bar"}
+              key={index}
+              x={x}
+              y={padding + (graphHeight - barHeight) / 2}
+              width={Math.max(1, barWidth - 2)}
+              height={barHeight}
+              rx="2"
+            />
+          );
+        })}
+      </g>
+      <rect className="trim-region" x={trimStartX} y={padding} width={Math.max(0, trimEndX - trimStartX)} height={graphHeight} />
+      <path className="envelope-fill" d={`${path} L ${points[1].x} ${height - padding} L ${trimStartX} ${height - padding} Z`} />
       <path className="envelope-line" d={path} />
+      {(["trimStart", "trimEnd"] as const).map((field) => {
+        const x = field === "trimStart" ? trimStartX : trimEndX;
+        return (
+          <g
+            className="trim-handle"
+            key={field}
+            onPointerDown={(event) => handleTrimPointerDown(field, event)}
+            onPointerMove={(event) => handleTrimPointerMove(field, event)}
+          >
+            <line x1={x} x2={x} y1={padding - 8} y2={height - padding + 8} />
+            <rect x={x - 11} y={padding - 18} width="22" height={graphHeight + 36} rx="8" />
+            <text x={clamp(x, 26, width - 26)} y={height - 8} textAnchor="middle">
+              {field === "trimStart" ? "START" : "END"}
+            </text>
+          </g>
+        );
+      })}
       {points.map((point) => (
         <g key={point.id}>
           <circle
@@ -1168,7 +1717,7 @@ function EnvelopeGraph({
             onPointerDown={(event) => handlePointerDown(point.id, event)}
             onPointerMove={(event) => handlePointerMove(point.id, event)}
           />
-          <text className="envelope-dot-label" x={point.x} y={Math.max(17, point.y - 22)} textAnchor="middle">
+          <text className="envelope-dot-label" x={clamp(point.x, 16, width - 16)} y={Math.max(17, point.y - 22)} textAnchor="middle">
             {point.label}
           </text>
         </g>
@@ -1241,10 +1790,39 @@ function defaultVolumeControlsAsStored(): StoredControl[] {
   }));
 }
 
+const reservedControlKeys = new Set([
+  ...defaultVolumeControlNumbers.map((cc) => `cc:${cc}`),
+  "cc:25",
+  "cc:26",
+  "cc:36"
+]);
+
+function sanitizeTransportControl(control: StoredControl, fallback: StoredControl): StoredControl {
+  if (!control || reservedControlKeys.has(control.key)) {
+    return fallback;
+  }
+  return control;
+}
+
 function shouldShowMidiEvent(event: MidiActivity): boolean {
   return event.label !== "Timing clock" && event.label !== "Active sensing";
 }
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+function quantizeTempo(value: number): number {
+  return Math.round(clamp(value, 10, 600) * 2) / 2;
+}
+
+function formatPan(pan: number): string {
+  const amount = Math.round(Math.abs(pan) * 100);
+  return amount === 0 ? "Center" : `${pan < 0 ? "L" : "R"} ${amount}`;
+}
+
+// The Monologue's envelope knobs transmit CC values 64-127; stretch that span
+// so 64 lands at the far left and 127 at the far right.
+function mapEnvelopeKnobRange(value: number): number {
+  return clamp((value * 127 - 64) / 63, 0, 1);
 }

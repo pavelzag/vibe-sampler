@@ -37,6 +37,12 @@ export class TransportScheduler {
   private scheduledSteps: ScheduledStep[] = [];
   private suppressedHits = new Map<string, number>();
   private modeChangeId = 0;
+  private clockSource: "internal" | "external" = "internal";
+  private externalPulseCount = 0;
+  private externalClockTimestamps: Array<{ pulse: number; timestamp: number }> = [];
+  private externalLastClockTimestamp: number | null = null;
+  private externalLastScheduledBoundary = -1;
+  private externalPulseIntervalMs = 60000 / (120 * 24);
   private readonly lookaheadMs = 25;
   private readonly scheduleAheadSeconds = 0.14;
 
@@ -63,6 +69,7 @@ export class TransportScheduler {
 
   play(): void {
     if (this.mode === "idle") {
+      this.clockSource = "internal";
       this.startClock("playback");
       return;
     }
@@ -74,6 +81,73 @@ export class TransportScheduler {
     this.setMode("playback");
   }
 
+  restart(): void {
+    this.stop();
+    this.startClock("playback");
+  }
+
+  startExternal(): void {
+    this.modeChangeId += 1;
+    this.clearTimer();
+    this.clockSource = "external";
+    this.externalPulseCount = 0;
+    this.externalClockTimestamps = [];
+    this.externalLastClockTimestamp = null;
+    this.externalLastScheduledBoundary = -1;
+    this.externalPulseIntervalMs = 60_000 / (this.getTempo() * 24);
+    this.nextStep = 0;
+    this.nextStepTime = this.engine.audioContext.currentTime;
+    this.countInSteps = 0;
+    this.scheduledSteps = [];
+    this.suppressedHits.clear();
+    this.setMode("playback");
+  }
+
+  continueExternal(): void {
+    if (this.mode === "idle" || this.clockSource !== "external") {
+      this.startExternal();
+    }
+  }
+
+  receiveExternalClock(timestamp: number): void {
+    if (this.clockSource !== "external" || this.mode === "idle") {
+      return;
+    }
+
+    const currentTime = this.engine.audioContext.currentTime;
+    const previousTimestamp = this.externalLastClockTimestamp;
+    if (previousTimestamp !== null) {
+      const elapsedPulses = Math.round((timestamp - previousTimestamp) / this.externalPulseIntervalMs);
+      this.externalPulseCount += clamp(elapsedPulses, 1, 24);
+    }
+    const clockTiming = this.smoothExternalClockTimestamp(timestamp, this.externalPulseCount);
+    this.externalPulseIntervalMs = clockTiming.pulseInterval;
+    this.externalLastClockTimestamp = timestamp;
+    this.pruneScheduledSteps(currentTime);
+    this.pruneSuppressedHits(currentTime);
+
+    let nextBoundary = this.externalPulseCount === 0
+      ? 0
+      : Math.ceil(this.externalPulseCount / 6) * 6;
+    if (nextBoundary <= this.externalLastScheduledBoundary) {
+      nextBoundary = this.externalLastScheduledBoundary + 6;
+    }
+    const pulsesUntilBoundary = nextBoundary - this.externalPulseCount;
+    const schedulingHorizon = this.externalClockTimestamps.length >= 12 ? 6 : 3;
+    if (nextBoundary > this.externalLastScheduledBoundary && pulsesUntilBoundary <= schedulingHorizon) {
+      const currentStep = this.nextStep;
+      const baseStepSeconds = 60 / this.getTempo() / 4;
+      const swingDelay = currentStep % 2 === 1 ? baseStepSeconds * this.getSwing() : 0;
+      const boundaryTimestamp = clockTiming.timestamp + pulsesUntilBoundary * clockTiming.pulseInterval;
+      const eventDelay = (boundaryTimestamp - performance.now()) / 1000;
+      const time = currentTime + Math.max(0.005, eventDelay) + swingDelay;
+      this.scheduleStep(currentStep, time);
+      this.nextStep = (currentStep + 1) % this.getStepCount();
+      this.nextStepTime = time + baseStepSeconds;
+      this.externalLastScheduledBoundary = nextBoundary;
+    }
+  }
+
   stop(): void {
     this.modeChangeId += 1;
     this.clearTimer();
@@ -83,6 +157,12 @@ export class TransportScheduler {
     this.countInSteps = 0;
     this.scheduledSteps = [];
     this.suppressedHits.clear();
+    this.externalPulseCount = 0;
+    this.externalClockTimestamps = [];
+    this.externalLastClockTimestamp = null;
+    this.externalLastScheduledBoundary = -1;
+    this.externalPulseIntervalMs = 60_000 / (this.getTempo() * 24);
+    this.clockSource = "internal";
     this.onModeChange("idle");
     this.onStep(0, "idle");
   }
@@ -115,12 +195,53 @@ export class TransportScheduler {
   }
 
   private startClock(mode: TransportMode): void {
+    this.clockSource = "internal";
     this.nextStep = 0;
     this.nextStepTime = this.engine.audioContext.currentTime + 0.05;
     this.countInSteps = 0;
     this.scheduledSteps = [];
     this.setMode(mode);
     this.ensureTimer();
+  }
+
+  private smoothExternalClockTimestamp(timestamp: number, pulse: number): { timestamp: number; pulseInterval: number } {
+    const previousTimestamp = this.externalClockTimestamps.at(-1)?.timestamp;
+    if (previousTimestamp !== undefined && (timestamp <= previousTimestamp || timestamp - previousTimestamp > 1000)) {
+      this.externalClockTimestamps = [];
+    }
+
+    this.externalClockTimestamps.push({ pulse, timestamp });
+    this.externalClockTimestamps = this.externalClockTimestamps.slice(-24);
+    const count = this.externalClockTimestamps.length;
+    if (count < 6) {
+      const firstClock = this.externalClockTimestamps[0];
+      const lastClock = this.externalClockTimestamps[count - 1];
+      const pulseSpan = lastClock.pulse - firstClock.pulse;
+      const observedPulseInterval = pulseSpan > 0
+        ? (lastClock.timestamp - firstClock.timestamp) / pulseSpan
+        : this.externalPulseIntervalMs;
+      return {
+        timestamp,
+        pulseInterval: observedPulseInterval
+      };
+    }
+
+    const xMean = this.externalClockTimestamps.reduce((sum, value) => sum + value.pulse, 0) / count;
+    const yMean = this.externalClockTimestamps.reduce((sum, value) => sum + value.timestamp, 0) / count;
+    let covariance = 0;
+    let variance = 0;
+    this.externalClockTimestamps.forEach((value) => {
+      const centeredIndex = value.pulse - xMean;
+      covariance += centeredIndex * (value.timestamp - yMean);
+      variance += centeredIndex * centeredIndex;
+    });
+
+    const pulseInterval = covariance / variance;
+    const fittedTimestamp = yMean + pulseInterval * (pulse - xMean);
+    return {
+      timestamp: clamp(fittedTimestamp, timestamp - 5, timestamp + 5),
+      pulseInterval
+    };
   }
 
   private ensureTimer(): void {
@@ -253,4 +374,8 @@ export class TransportScheduler {
   private notifyAtTime(time: number, callback: () => void): void {
     window.setTimeout(callback, Math.max(0, (time - this.engine.audioContext.currentTime) * 1000));
   }
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
 }

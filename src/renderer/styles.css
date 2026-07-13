@@ -107,6 +107,100 @@ footer,
   flex-wrap: wrap;
 }
 
+.fx-panel {
+  border-top: 1px solid #2c3037;
+  margin-top: 14px;
+  padding-top: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.send-targets {
+  display: inline-flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.send-targets button {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.send-targets button.selected {
+  border-color: #d8f05f;
+  background: #25291c;
+  color: #f2f0ea;
+}
+
+.fx-send-slider,
+.fx-sends label {
+  display: grid;
+  gap: 6px;
+  color: #c8cdd4;
+  font-size: 12px;
+}
+
+.fx-send-slider span,
+.fx-sends span {
+  color: #aeb4bd;
+}
+
+.fx-cc-toggle {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.fx-cc-toggle.active {
+  border-color: #d8f05f;
+  background: #25291c;
+  color: #f2f0ea;
+}
+
+.fx-params {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.fx-param-slider {
+  display: grid;
+  gap: 4px;
+  color: #c8cdd4;
+  font-size: 12px;
+}
+
+.fx-param-slider span {
+  color: #aeb4bd;
+}
+
+.fx-param-slider em {
+  font-style: normal;
+  color: #d8f05f;
+  font-size: 11px;
+}
+
+.fx-param-slider input {
+  width: 100%;
+}
+
+.fx-sends {
+  display: grid;
+  gap: 8px;
+}
+
+.fx-sends label {
+  grid-template-columns: 42px 1fr;
+  align-items: center;
+}
+
+.fx-sends input {
+  width: 100%;
+}
+
 .primary {
   background: #d8f05f;
   border-color: #d8f05f;
@@ -127,6 +221,7 @@ footer,
 
 .tempo,
 .bank-select,
+.midi-channel-select,
 .midi-pill {
   border: 1px solid #383b42;
   background: #16191e;
@@ -148,6 +243,14 @@ footer,
 
 .bank-select select {
   min-width: 150px;
+  background: transparent;
+  color: #f2f0ea;
+  border: 0;
+  outline: 0;
+}
+
+.midi-channel-select select {
+  min-width: 96px;
   background: transparent;
   color: #f2f0ea;
   border: 0;
@@ -329,38 +432,106 @@ footer,
   font-size: 12px;
 }
 
-.waveform {
-  height: 180px;
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 16px;
-  background: #0d0f12;
+.waveform-editor {
+  width: 100%;
+  height: 250px;
+  display: block;
   border: 1px solid #2a2e35;
   border-radius: 8px;
-  overflow: hidden;
+  background: #0d0f12;
+  touch-action: none;
+  user-select: none;
 }
 
-.waveform span {
-  flex: 1;
-  min-width: 2px;
-  background: linear-gradient(180deg, #d8f05f, #66d4cf);
-  border-radius: 999px;
-}
-
-.empty-wave {
-  width: 100%;
+.waveform-editor.empty-wave {
+  min-height: 180px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   color: #787f88;
   text-align: center;
 }
 
-.trim-row {
-  margin: 16px 0;
+.sample-values {
+  margin: 12px 0;
+  padding: 10px 12px 12px;
+  border: 1px solid #30343c;
+  border-radius: 8px;
   display: grid;
-  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px 14px;
+  background: #101318;
 }
 
-.trim-row label,
+.sample-values legend {
+  padding: 0 6px;
+  color: #aeb4bd;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.sample-values label {
+  display: grid;
+  grid-template-columns: 48px minmax(60px, 1fr) 60px;
+  align-items: center;
+  gap: 8px;
+  color: #c8cdd4;
+  font-size: 12px;
+}
+
+.sample-values output {
+  color: #d8f05f;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+  text-align: right;
+}
+
+.sample-values:disabled {
+  opacity: 0.45;
+}
+
+.waveform-bg {
+  fill: #0d0f12;
+}
+
+.waveform-grid-lines line {
+  stroke: #232832;
+  stroke-width: 1;
+}
+
+.waveform-bar {
+  fill: #66d4cf;
+  opacity: 0.92;
+}
+
+.waveform-bar.trimmed {
+  opacity: 0.16;
+}
+
+.trim-region {
+  fill: rgba(216, 240, 95, 0.06);
+  pointer-events: none;
+}
+
+.trim-handle line {
+  stroke: #f2f0ea;
+  stroke-width: 3;
+}
+
+.trim-handle rect {
+  fill: rgba(216, 240, 95, 0.08);
+  stroke: rgba(216, 240, 95, 0.65);
+  cursor: ew-resize;
+}
+
+.trim-handle text {
+  fill: #f2f0ea;
+  font-size: 20px;
+  font-weight: 800;
+  pointer-events: none;
+}
+
 .mixer-strip label {
   display: grid;
   grid-template-columns: 58px 1fr;
@@ -484,7 +655,7 @@ input[type="range"] {
 }
 
 .mixer-strip label {
-  grid-template-columns: 18px 1fr;
+  grid-template-columns: 28px 1fr;
 }
 
 .control-label {

@@ -117,6 +117,9 @@ app.whenReady().then(async () => {
     dirname: __dirname,
     rendererDevServerUrl: rendererDevServerUrl ?? null
   });
+  session.defaultSession.setPermissionCheckHandler(
+    (_webContents, permission) => permission === "media" || permission === "midi" || permission === "midiSysex"
+  );
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
     log("info", "Permission requested", { permission });
     callback(permission === "media" || permission === "midi" || permission === "midiSysex");
