@@ -1,5 +1,5 @@
-import { app, session, BrowserWindow } from "electron";
-import { mkdirSync, appendFileSync, existsSync } from "node:fs";
+import { app, session, BrowserWindow, ipcMain } from "electron";
+import { mkdirSync, appendFileSync, existsSync, readFileSync, writeFileSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import __cjs_mod__ from "node:module";
 const __filename = import.meta.filename;
@@ -8,6 +8,7 @@ const require2 = __cjs_mod__.createRequire(import.meta.url);
 const rendererDevServerUrl = process.env.ELECTRON_RENDERER_URL;
 const isDev = Boolean(rendererDevServerUrl);
 let logFilePath = null;
+const cloudSampleCatalogUrl = "https://storage.googleapis.com/vibe-sampler-samples/catalog.json";
 app.commandLine.appendSwitch("audio-buffer-size", "64");
 function log(level, message, detail) {
   const line = `[vibe-sampler:main] ${(/* @__PURE__ */ new Date()).toISOString()} ${level.toUpperCase()} ${message}${detail === void 0 ? "" : ` ${formatDetail(detail)}`}`;
@@ -51,6 +52,241 @@ function resolvePreloadPath() {
   });
   return preloadPath;
 }
+function getSampleLibraryRoot() {
+  const root = join(app.getPath("userData"), "samples");
+  mkdirSync(root, { recursive: true });
+  return root;
+}
+function safeId(value) {
+  const id = value.normalize("NFKD").replace(/[^a-zA-Z0-9 _-]/g, "").trim().replace(/[ _]+/g, "-").toLowerCase();
+  if (!id) {
+    throw new Error("A bank or sample name is required");
+  }
+  return id;
+}
+function bankDirectory(bankId) {
+  return join(getSampleLibraryRoot(), safeId(bankId));
+}
+function readBankManifest(bankId) {
+  const directory = bankDirectory(bankId);
+  const manifestPath = join(directory, "bank.json");
+  if (!existsSync(manifestPath)) {
+    throw new Error(`Unknown user bank: ${bankId}`);
+  }
+  return JSON.parse(readFileSync(manifestPath, "utf8"));
+}
+function writeBankManifest(manifest) {
+  const directory = bankDirectory(manifest.id);
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, "bank.json"), JSON.stringify(manifest, null, 2), "utf8");
+}
+function listUserBanks() {
+  const root = getSampleLibraryRoot();
+  return readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory()).flatMap((entry) => {
+    try {
+      return [readBankManifest(entry.name)];
+    } catch {
+      return [];
+    }
+  }).sort((left, right) => left.name.localeCompare(right.name));
+}
+function onboardingPreferencePath() {
+  return join(app.getPath("userData"), "cloud-samples.json");
+}
+function readOnboardingDecision() {
+  try {
+    const stored = JSON.parse(readFileSync(onboardingPreferencePath(), "utf8"));
+    return stored.decision === "accepted" || stored.decision === "declined" ? stored.decision : null;
+  } catch {
+    return null;
+  }
+}
+function writeOnboardingDecision(decision) {
+  writeFileSync(onboardingPreferencePath(), JSON.stringify({ decision }, null, 2), "utf8");
+}
+async function fetchCloudCatalog() {
+  const response = await fetch(cloudSampleCatalogUrl, { signal: AbortSignal.timeout(15e3) });
+  if (!response.ok) {
+    throw new Error(`Starter sample catalog returned HTTP ${response.status}`);
+  }
+  const catalog = await response.json();
+  if (catalog.version !== 1 || !Array.isArray(catalog.banks) || catalog.banks.length > 32) {
+    throw new Error("Starter sample catalog is invalid");
+  }
+  for (const bank of catalog.banks) {
+    safeId(bank.id);
+    if (!bank.name?.trim() || !Array.isArray(bank.samples) || bank.samples.length > 8) {
+      throw new Error("Starter sample bank is invalid");
+    }
+    for (const sample of bank.samples) {
+      if (!Number.isInteger(sample.slot) || sample.slot < 0 || sample.slot > 7 || !sample.name?.trim()) {
+        throw new Error("Starter sample entry is invalid");
+      }
+      const objectUrl = new URL(sample.object, cloudSampleCatalogUrl);
+      if (objectUrl.origin !== new URL(cloudSampleCatalogUrl).origin || !objectUrl.pathname.toLowerCase().endsWith(".wav")) {
+        throw new Error("Starter sample URL is invalid");
+      }
+    }
+  }
+  return catalog;
+}
+async function importCloudSamples() {
+  const catalog = await fetchCloudCatalog();
+  const imported = [];
+  try {
+    for (const cloudBank of catalog.banks) {
+      const baseId = `starter-${safeId(cloudBank.id)}`;
+      let id = baseId;
+      let suffix = 2;
+      while (existsSync(bankDirectory(id))) {
+        id = `${baseId}-${suffix++}`;
+      }
+      const temporaryDirectory = join(getSampleLibraryRoot(), `.${id}-${Date.now()}`);
+      mkdirSync(temporaryDirectory, { recursive: true });
+      try {
+        const samples = [];
+        for (const cloudSample of cloudBank.samples) {
+          const objectUrl = new URL(cloudSample.object, cloudSampleCatalogUrl);
+          const response = await fetch(objectUrl, { signal: AbortSignal.timeout(3e4) });
+          if (!response.ok) {
+            throw new Error(`Could not download ${cloudSample.name} (HTTP ${response.status})`);
+          }
+          const wavData = new Uint8Array(await response.arrayBuffer());
+          const isWav = wavData.byteLength >= 12 && new TextDecoder("ascii").decode(wavData.slice(0, 4)) === "RIFF" && new TextDecoder("ascii").decode(wavData.slice(8, 12)) === "WAVE";
+          if (!isWav || wavData.byteLength > 50 * 1024 * 1024) {
+            throw new Error(`Invalid WAV data for ${cloudSample.name}`);
+          }
+          const fileName = `${String(cloudSample.slot + 1).padStart(2, "0")}-${safeId(cloudSample.name)}.wav`;
+          writeFileSync(join(temporaryDirectory, fileName), wavData);
+          samples.push({
+            slot: cloudSample.slot,
+            name: cloudSample.name.trim(),
+            fileName,
+            detectedPitch: cloudSample.detectedPitch ?? null,
+            pitchSemitones: cloudSample.pitchSemitones ?? 0,
+            trimStart: cloudSample.trimStart,
+            trimEnd: cloudSample.trimEnd,
+            envelope: cloudSample.envelope
+          });
+        }
+        const manifest = { id, name: cloudBank.name.trim(), samples };
+        writeFileSync(join(temporaryDirectory, "bank.json"), JSON.stringify(manifest, null, 2), "utf8");
+        renameSync(temporaryDirectory, bankDirectory(id));
+        imported.push(manifest);
+      } catch (error) {
+        rmSync(temporaryDirectory, { recursive: true, force: true });
+        throw error;
+      }
+    }
+    writeOnboardingDecision("accepted");
+    return imported;
+  } catch (error) {
+    imported.forEach((bank) => rmSync(bankDirectory(bank.id), { recursive: true, force: true }));
+    throw error;
+  }
+}
+function registerSampleLibraryIpc() {
+  ipcMain.handle("sample-library:list", () => ({ root: getSampleLibraryRoot(), banks: listUserBanks() }));
+  ipcMain.handle("sample-library:create-bank", (_event, requestedName) => {
+    const name = requestedName.trim();
+    const baseId = safeId(name);
+    let id = baseId;
+    let suffix = 2;
+    while (existsSync(bankDirectory(id))) {
+      id = `${baseId}-${suffix}`;
+      suffix += 1;
+    }
+    const manifest = { id, name, samples: [] };
+    writeBankManifest(manifest);
+    return manifest;
+  });
+  ipcMain.handle("cloud-samples:onboarding", async () => {
+    if (readOnboardingDecision()) {
+      return { shouldPrompt: false, banks: [] };
+    }
+    const catalog = await fetchCloudCatalog();
+    return {
+      shouldPrompt: true,
+      banks: catalog.banks.map((bank) => ({ name: bank.name, sampleCount: bank.samples.length }))
+    };
+  });
+  ipcMain.handle("cloud-samples:decline", () => writeOnboardingDecision("declined"));
+  ipcMain.handle("cloud-samples:import", () => importCloudSamples());
+  ipcMain.handle("sample-library:load-bank", (_event, bankId) => {
+    const manifest = readBankManifest(bankId);
+    const directory = bankDirectory(bankId);
+    return {
+      ...manifest,
+      samples: manifest.samples.map((sample) => ({
+        ...sample,
+        data: new Uint8Array(readFileSync(join(directory, sample.fileName)))
+      }))
+    };
+  });
+  ipcMain.handle(
+    "sample-library:save-sample",
+    (_event, input) => {
+      const manifest = readBankManifest(input.bankId);
+      if (!Number.isInteger(input.slot) || input.slot < 0 || input.slot > 7) {
+        throw new Error("Sample slot must be between 0 and 7");
+      }
+      const baseFileName = `${safeId(input.name)}.wav`;
+      const collidesWithAnotherSlot = manifest.samples.some(
+        (item) => item.slot !== input.slot && item.fileName.toLowerCase() === baseFileName.toLowerCase()
+      );
+      const fileName = collidesWithAnotherSlot ? `${safeId(input.name)}-${input.slot + 1}.wav` : baseFileName;
+      writeFileSync(join(bankDirectory(manifest.id), fileName), Buffer.from(input.wavData));
+      const sample = {
+        slot: input.slot,
+        name: input.name.trim(),
+        fileName,
+        detectedPitch: input.detectedPitch,
+        pitchSemitones: input.pitchSemitones,
+        trimStart: input.trimStart,
+        trimEnd: input.trimEnd,
+        envelope: input.envelope
+      };
+      manifest.samples = [...manifest.samples.filter((item) => item.slot !== input.slot), sample].sort(
+        (left, right) => left.slot - right.slot
+      );
+      writeBankManifest(manifest);
+      return manifest;
+    }
+  );
+  ipcMain.handle(
+    "sample-library:set-pitch",
+    (_event, input) => {
+      const manifest = readBankManifest(input.bankId);
+      const sample = manifest.samples.find((item) => item.slot === input.slot);
+      if (!sample) {
+        throw new Error("No library sample in this slot");
+      }
+      sample.pitchSemitones = Math.max(-24, Math.min(24, input.pitchSemitones));
+      writeBankManifest(manifest);
+      return manifest;
+    }
+  );
+  ipcMain.handle(
+    "sample-library:set-edit",
+    (_event, input) => {
+      const manifest = readBankManifest(input.bankId);
+      const sample = manifest.samples.find((item) => item.slot === input.slot);
+      if (!sample) {
+        throw new Error("No library sample in this slot");
+      }
+      sample.trimStart = Math.max(0, input.trimStart);
+      sample.trimEnd = Math.max(sample.trimStart + 1e-3, input.trimEnd);
+      sample.envelope = {
+        attack: Math.max(0, input.envelope.attack),
+        release: Math.max(0, input.envelope.release),
+        attackLevel: Math.max(0, Math.min(1, input.envelope.attackLevel ?? 1)),
+        releaseLevel: Math.max(0, Math.min(1, input.envelope.releaseLevel ?? 0))
+      };
+      writeBankManifest(manifest);
+      return manifest;
+    }
+  );
+}
 function createWindow() {
   const preloadPath = resolvePreloadPath();
   log("info", "Creating browser window", {
@@ -69,7 +305,15 @@ function createWindow() {
       preload: preloadPath,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true
+    }
+  });
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    const currentUrl = mainWindow.webContents.getURL();
+    if (url !== currentUrl) {
+      event.preventDefault();
+      log("warn", "Blocked renderer navigation", { url });
     }
   });
   if (isDev && rendererDevServerUrl) {
@@ -97,9 +341,13 @@ function createWindow() {
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
     log("error", "Renderer process gone", details);
   });
-  mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
-    const mappedLevel = level >= 3 ? "error" : level === 2 ? "warn" : "info";
-    log(mappedLevel, "Renderer console", { message, line, sourceId });
+  mainWindow.webContents.on("console-message", (details) => {
+    const mappedLevel = details.level === "error" ? "error" : details.level === "warning" ? "warn" : "info";
+    log(mappedLevel, "Renderer console", {
+      message: details.message,
+      line: details.lineNumber,
+      sourceId: details.sourceId
+    });
   });
 }
 app.whenReady().then(async () => {
@@ -117,6 +365,7 @@ app.whenReady().then(async () => {
     dirname: __dirname,
     rendererDevServerUrl: rendererDevServerUrl ?? null
   });
+  registerSampleLibraryIpc();
   session.defaultSession.setPermissionCheckHandler(
     (_webContents, permission) => permission === "media" || permission === "midi" || permission === "midiSysex"
   );
