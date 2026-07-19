@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
-    "dist:mac": "npm run build && electron-builder --mac dmg --universal",
+    "dist:mac": "npm run build && electron-builder --mac dmg --universal --publish never",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit"
   },
