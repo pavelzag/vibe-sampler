@@ -6,6 +6,21 @@ export type Sample = {
   buffer: AudioBuffer;
   trimStart: number;
   trimEnd: number;
+  detectedPitch: DetectedPitch | null;
+  pitchSemitones: number;
+};
+
+export type SampleEnvelope = {
+  attack: number;
+  release: number;
+  attackLevel?: number;
+  releaseLevel?: number;
+};
+
+export type DetectedPitch = {
+  frequency: number;
+  note: string;
+  cents: number;
 };
 
 export type FxSendTarget = "distortion" | "reverb" | "delay" | "bitcrusher";
@@ -41,11 +56,9 @@ export type Channel = {
   level: number;
   pan: number;
   fxSends: Record<FxSendTarget, number>;
-  envelope: {
-    attack: number;
-    release: number;
-  };
+  envelope: SampleEnvelope;
   muted: boolean;
+  soloed: boolean;
   sample: Sample | null;
   steps: boolean[];
 };
@@ -88,6 +101,7 @@ export function createChannels(): Channel[] {
       release: 0.34
     },
     muted: false,
+    soloed: false,
     sample: null,
     steps: createHousePattern()
   }));
@@ -371,13 +385,15 @@ export class SamplerEngine {
       return false;
     }
 
-    const duration = channel.sample.trimEnd - channel.sample.trimStart;
-    if (duration <= 0.01) {
+    const sourceDuration = channel.sample.trimEnd - channel.sample.trimStart;
+    if (sourceDuration <= 0.01) {
       return false;
     }
 
+    const playbackRate = Math.pow(2, clamp(channel.sample.pitchSemitones, -24, 24) / 12);
+    const availableDuration = sourceDuration / playbackRate;
     const envelopeDuration = getEnvelopeDuration(channel.envelope);
-    const playbackDuration = Math.min(duration, envelopeDuration);
+    const playbackDuration = Math.min(availableDuration, envelopeDuration);
     if (playbackDuration <= 0.01) {
       return false;
     }
@@ -386,6 +402,7 @@ export class SamplerEngine {
     const velocityGain = this.context.createGain();
     const envelopeGain = this.context.createGain();
     source.buffer = channel.sample.buffer;
+    source.playbackRate.setValueAtTime(playbackRate, when);
     velocityGain.gain.value = clamp(velocity, 0, 1);
     applyEnvelope(envelopeGain.gain, channel.envelope, when, playbackDuration);
     source.connect(velocityGain);
@@ -395,11 +412,21 @@ export class SamplerEngine {
     envelopeGain.connect(this.channelFxSends.reverb[channel.id]);
     envelopeGain.connect(this.channelFxSends.delay[channel.id]);
     envelopeGain.connect(this.channelFxSends.bitcrusher[channel.id]);
-    source.start(when, channel.sample.trimStart, playbackDuration);
+    source.start(when, channel.sample.trimStart, playbackDuration * playbackRate);
     return true;
   }
 
-  async decode(blob: Blob, name: string): Promise<Sample> {
+  async decode(
+    blob: Blob,
+    name: string,
+    metadata?: {
+      detectedPitch?: DetectedPitch | null;
+      pitchSemitones?: number;
+      detectPitch?: boolean;
+      trimStart?: number;
+      trimEnd?: number;
+    }
+  ): Promise<Sample> {
     logInfo("Decoding audio blob", { name, size: blob.size, type: blob.type });
     const data = await blob.arrayBuffer();
     const buffer = await this.context.decodeAudioData(data.slice(0));
@@ -413,8 +440,12 @@ export class SamplerEngine {
       id: crypto.randomUUID(),
       name,
       buffer,
-      trimStart: 0,
-      trimEnd: buffer.duration
+      trimStart: clamp(metadata?.trimStart ?? 0, 0, Math.max(0, buffer.duration - 0.02)),
+      trimEnd: clamp(metadata?.trimEnd ?? buffer.duration, 0.02, buffer.duration),
+      detectedPitch: metadata?.detectedPitch === undefined
+        ? metadata?.detectPitch ? detectPitch(buffer) : null
+        : metadata.detectedPitch,
+      pitchSemitones: clamp(metadata?.pitchSemitones ?? 0, -24, 24)
     };
   }
 
@@ -450,6 +481,29 @@ export class SamplerEngine {
     return { ...sample, id: crypto.randomUUID(), buffer };
   }
 
+  crop(sample: Sample): Sample {
+    const startFrame = clamp(Math.floor(sample.trimStart * sample.buffer.sampleRate), 0, sample.buffer.length - 1);
+    const endFrame = clamp(Math.ceil(sample.trimEnd * sample.buffer.sampleRate), startFrame + 1, sample.buffer.length);
+    const frameCount = endFrame - startFrame;
+    const buffer = this.context.createBuffer(
+      sample.buffer.numberOfChannels,
+      frameCount,
+      sample.buffer.sampleRate
+    );
+    for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+      const source = sample.buffer.getChannelData(channel).subarray(startFrame, endFrame);
+      buffer.copyToChannel(source, channel);
+    }
+    return {
+      ...sample,
+      id: crypto.randomUUID(),
+      buffer,
+      trimStart: 0,
+      trimEnd: buffer.duration,
+      detectedPitch: detectPitch(buffer)
+    };
+  }
+
   renderWaveform(sample: Sample, width = 220): number[] {
     const data = sample.buffer.getChannelData(0);
     const bucketSize = Math.max(1, Math.floor(data.length / width));
@@ -476,6 +530,112 @@ export function getEnvelopeDuration(envelope: Channel["envelope"]): number {
   return Math.max(envelope.attack + 0.02, envelope.release);
 }
 
+export function detectPitch(buffer: AudioBuffer): DetectedPitch | null {
+  const source = buffer.getChannelData(0);
+  const stride = Math.max(1, Math.round(buffer.sampleRate / 11025));
+  const analysisRate = buffer.sampleRate / stride;
+  const start = Math.min(source.length, Math.floor(buffer.sampleRate * 0.01));
+  const length = Math.min(8192, Math.floor((source.length - start) / stride));
+  if (length < 512) {
+    return null;
+  }
+
+  const data = new Float32Array(length);
+  let mean = 0;
+  for (let index = 0; index < length; index += 1) {
+    mean += source[start + index * stride];
+  }
+  mean /= length;
+  let energy = 0;
+  for (let index = 0; index < length; index += 1) {
+    const value = source[start + index * stride] - mean;
+    data[index] = value;
+    energy += value * value;
+  }
+  if (Math.sqrt(energy / length) < 0.008) {
+    return null;
+  }
+
+  const minimumLag = Math.max(2, Math.floor(analysisRate / 2000));
+  const maximumLag = Math.min(Math.floor(analysisRate / 40), Math.floor(length / 2));
+  const correlations = new Float32Array(maximumLag + 1);
+  let bestLag = 0;
+  let bestCorrelation = 0;
+  for (let lag = minimumLag; lag <= maximumLag; lag += 1) {
+    let cross = 0;
+    let leftEnergy = 0;
+    let rightEnergy = 0;
+    for (let index = 0; index < length - lag; index += 1) {
+      const left = data[index];
+      const right = data[index + lag];
+      cross += left * right;
+      leftEnergy += left * left;
+      rightEnergy += right * right;
+    }
+    const correlation = cross / Math.sqrt(leftEnergy * rightEnergy || 1);
+    correlations[lag] = correlation;
+    if (correlation > bestCorrelation) {
+      bestCorrelation = correlation;
+      bestLag = lag;
+    }
+  }
+  if (bestCorrelation < 0.62 || bestLag === 0) {
+    return null;
+  }
+
+  const left = correlations[Math.max(minimumLag, bestLag - 1)];
+  const center = correlations[bestLag];
+  const right = correlations[Math.min(maximumLag, bestLag + 1)];
+  const denominator = left - 2 * center + right;
+  const refinedLag = bestLag + (Math.abs(denominator) > 1e-6 ? 0.5 * (left - right) / denominator : 0);
+  const frequency = analysisRate / refinedLag;
+  const midiValue = 69 + 12 * Math.log2(frequency / 440);
+  const nearestNote = Math.round(midiValue);
+  const noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+  return {
+    frequency,
+    note: `${noteNames[((nearestNote % 12) + 12) % 12]}${Math.floor(nearestNote / 12) - 1}`,
+    cents: Math.round((midiValue - nearestNote) * 100)
+  };
+}
+
+export function encodeWav(buffer: AudioBuffer): Uint8Array {
+  const channels = Math.min(2, buffer.numberOfChannels);
+  const frameCount = buffer.length;
+  const bytesPerSample = 2;
+  const dataSize = frameCount * channels * bytesPerSample;
+  const output = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(output);
+  const writeText = (offset: number, text: string) => {
+    for (let index = 0; index < text.length; index += 1) {
+      view.setUint8(offset + index, text.charCodeAt(index));
+    }
+  };
+  writeText(0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeText(8, "WAVE");
+  writeText(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, channels, true);
+  view.setUint32(24, buffer.sampleRate, true);
+  view.setUint32(28, buffer.sampleRate * channels * bytesPerSample, true);
+  view.setUint16(32, channels * bytesPerSample, true);
+  view.setUint16(34, 16, true);
+  writeText(36, "data");
+  view.setUint32(40, dataSize, true);
+  const channelData = Array.from({ length: channels }, (_, channel) => buffer.getChannelData(channel));
+  let offset = 44;
+  for (let frame = 0; frame < frameCount; frame += 1) {
+    for (let channel = 0; channel < channels; channel += 1) {
+      const value = clamp(channelData[channel][frame], -1, 1);
+      view.setInt16(offset, value < 0 ? value * 0x8000 : value * 0x7fff, true);
+      offset += bytesPerSample;
+    }
+  }
+  return new Uint8Array(output);
+}
+
 function applyEnvelope(
   gain: AudioParam,
   envelope: Channel["envelope"],
@@ -484,11 +644,13 @@ function applyEnvelope(
 ): void {
   const attack = clamp(envelope.attack, 0, Math.max(0, sampleDuration - 0.02));
   const releaseEnd = clamp(Math.max(attack + 0.02, envelope.release), 0.02, sampleDuration);
+  const attackLevel = clamp(envelope.attackLevel ?? 1, 0, 1);
+  const releaseLevel = clamp(envelope.releaseLevel ?? 0, 0, 1);
 
   gain.cancelScheduledValues(startTime);
   gain.setValueAtTime(0, startTime);
-  gain.linearRampToValueAtTime(1, startTime + attack);
-  gain.linearRampToValueAtTime(0, startTime + releaseEnd);
+  gain.linearRampToValueAtTime(attackLevel, startTime + attack);
+  gain.linearRampToValueAtTime(releaseLevel, startTime + releaseEnd);
 }
 
 function clamp(value: number, min: number, max: number): number {

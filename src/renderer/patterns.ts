@@ -41,6 +41,9 @@ const long: Envelope = {
   release: 0.82
 };
 
+const houseEnvelopes: Envelope[] = [punchy, tight, clipped, airy, airy, loose, clipped, long];
+const technoEnvelopes: Envelope[] = [tight, clipped, clipped, clipped, airy, tight, clipped, airy];
+
 export const patternPresets: PatternPreset[] = [
   {
     id: "groovy-house",
@@ -126,6 +129,261 @@ export const patternPresets: PatternPreset[] = [
       "----------------"
     ],
     envelopes: [tight, clipped, clipped, clipped, airy, clipped, clipped, airy]
+  },
+  {
+    id: "chicago-warehouse",
+    name: "Chicago Warehouse",
+    tempo: 123,
+    swing: 0.18,
+    steps: [
+      "x---x---x---x---",
+      "----------------",
+      "----x-------x---",
+      "x-x-x-x-x-x-x-x-",
+      "--x---x---x---x-",
+      "----------x-----",
+      "---x-------x----",
+      "----------------"
+    ],
+    envelopes: houseEnvelopes
+  },
+  {
+    id: "jackin-house",
+    name: "Jackin House",
+    tempo: 126,
+    swing: 0.22,
+    steps: [
+      "x---x---x---x-x-",
+      "----x-------x---",
+      "------------x---",
+      "--x-xx--x-x-xx--",
+      "------x-------x-",
+      "x---------x-----",
+      "---x--------x---",
+      "----------------"
+    ],
+    envelopes: houseEnvelopes
+  },
+  {
+    id: "acid-house-909",
+    name: "Acid House 909",
+    tempo: 125,
+    swing: 0.08,
+    steps: [
+      "x---x---x---x---",
+      "----x-------x---",
+      "--------x-------",
+      "x-x-x-x-x-x-x-x-",
+      "--x---x---x---x-",
+      "----------------",
+      "---x--x----x--x-",
+      "------------x---"
+    ],
+    envelopes: houseEnvelopes
+  },
+  {
+    id: "french-filter-house",
+    name: "French Filter House",
+    tempo: 126,
+    swing: 0.12,
+    steps: [
+      "x---x---x---x---",
+      "----x-------x---",
+      "----x-------x---",
+      "--x---x---x---x-",
+      "------x-------x-",
+      "x-------x-------",
+      "-----------x----",
+      "--------x-------"
+    ],
+    envelopes: [punchy, tight, airy, airy, long, loose, clipped, long]
+  },
+  {
+    id: "deep-organ-house",
+    name: "Deep Organ House",
+    tempo: 120,
+    swing: 0.19,
+    steps: [
+      "x---x---x---x---",
+      "----x-------x---",
+      "----------------",
+      "--x---x---x---x-",
+      "------x-------x-",
+      "----------x-----",
+      "---x---------x--",
+      "----------------"
+    ],
+    envelopes: [loose, loose, clipped, airy, long, loose, clipped, long]
+  },
+  {
+    id: "disco-house",
+    name: "Disco House",
+    tempo: 124,
+    swing: 0.14,
+    steps: [
+      "x---x---x---x---",
+      "----x-------x---",
+      "----x-------x---",
+      "x-x-x-x-x-x-x-x-",
+      "--x---x---x---x-",
+      "----------x-----",
+      "---x---x---x---x",
+      "x-------x-------"
+    ],
+    envelopes: [punchy, tight, airy, airy, long, loose, clipped, long]
+  },
+  {
+    id: "microhouse-dust",
+    name: "Microhouse Dust",
+    tempo: 122,
+    swing: 0.27,
+    steps: [
+      "x-----x-x---x---",
+      "----x-------x---",
+      "----------------",
+      "--x--x--x-x--x--",
+      "------x---------",
+      "---------x------",
+      "---x-------x--x-",
+      "---------------x"
+    ],
+    envelopes: [tight, tight, clipped, clipped, airy, clipped, clipped, airy]
+  },
+  {
+    id: "detroit-machine",
+    name: "Detroit Machine",
+    tempo: 132,
+    swing: 0.03,
+    steps: [
+      "x---x---x---x---",
+      "----x-------x---",
+      "----------------",
+      "x-x-x-x-x-x-x-x-",
+      "------x-------x-",
+      "x------x--x-----",
+      "---x------x--x--",
+      "--------x-------"
+    ],
+    envelopes: technoEnvelopes
+  },
+  {
+    id: "warehouse-techno",
+    name: "Warehouse Techno",
+    tempo: 136,
+    swing: 0,
+    steps: [
+      "x---x---x---x---",
+      "----x-------x---",
+      "--------x-------",
+      "xxxxxxxxxxxxxxxx",
+      "------x-------x-",
+      "x-------x-------",
+      "---x-------x----",
+      "----------------"
+    ],
+    envelopes: technoEnvelopes
+  },
+  {
+    id: "hypnotic-techno",
+    name: "Hypnotic Techno",
+    tempo: 134,
+    swing: 0.02,
+    steps: [
+      "x---x---x---x---",
+      "------------x---",
+      "----x-----------",
+      "x-xxx-xxx-xxx-xx",
+      "------x-------x-",
+      "--x------x------",
+      "-----x-------x--",
+      "----------------"
+    ],
+    envelopes: technoEnvelopes
+  },
+  {
+    id: "dub-techno",
+    name: "Dub Techno",
+    tempo: 124,
+    swing: 0.06,
+    steps: [
+      "x---x---x---x---",
+      "----x-------x---",
+      "----------------",
+      "--x---x---x---x-",
+      "------x-------x-",
+      "----------x-----",
+      "---x---------x--",
+      "--------x-------"
+    ],
+    envelopes: [loose, clipped, clipped, airy, long, loose, clipped, long]
+  },
+  {
+    id: "peak-time-techno",
+    name: "Peak-Time Techno",
+    tempo: 138,
+    swing: 0,
+    steps: [
+      "x---x---x---x---",
+      "----x-------x---",
+      "----x-------x---",
+      "xxxxxxxxxxxxxxxx",
+      "--x---x---x---x-",
+      "x---------x-----",
+      "---x---x---x---x",
+      "--------x-------"
+    ],
+    envelopes: technoEnvelopes
+  },
+  {
+    id: "industrial-techno",
+    name: "Industrial Techno",
+    tempo: 142,
+    swing: 0,
+    steps: [
+      "x---x---x---x---",
+      "----x-------x---",
+      "--------x-------",
+      "x-xxxxxxxxxxxxxx",
+      "------x-------x-",
+      "x--x----x--x----",
+      "---x--x----x--x-",
+      "------------x---"
+    ],
+    envelopes: [tight, clipped, clipped, clipped, clipped, tight, clipped, airy]
+  },
+  {
+    id: "hardgroove-techno",
+    name: "Hardgroove Techno",
+    tempo: 138,
+    swing: 0.12,
+    steps: [
+      "x---x---x---x---",
+      "----x-------x---",
+      "----------------",
+      "x-x-xxx-x-x-xxx-",
+      "------x-------x-",
+      "--x---x---x---x-",
+      "---x--x----x--x-",
+      "--------x-------"
+    ],
+    envelopes: technoEnvelopes
+  },
+  {
+    id: "acid-techno",
+    name: "Acid Techno",
+    tempo: 140,
+    swing: 0.04,
+    steps: [
+      "x---x---x---x---",
+      "----x-------x---",
+      "------------x---",
+      "x-x-x-xxx-x-x-xx",
+      "------x-------x-",
+      "x-------x--x----",
+      "---x-------x----",
+      "--------x-------"
+    ],
+    envelopes: technoEnvelopes
   },
   {
     id: "breakbeat",

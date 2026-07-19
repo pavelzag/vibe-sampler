@@ -282,6 +282,7 @@ export class TransportScheduler {
 
     const modeForStep = this.mode;
     const channels = this.getChannels();
+    const hasSoloedChannels = channels.some((channel) => channel.soloed);
     const hasPattern = channels.some((channel) => channel.steps.some(Boolean));
 
     this.scheduledSteps.push({ step, time });
@@ -294,7 +295,11 @@ export class TransportScheduler {
     }
 
     for (const channel of channels) {
-      if (!channel.steps[step] || this.isSuppressed(channel.id, step, time)) {
+      if (
+        !channel.steps[step] ||
+        (hasSoloedChannels && !channel.soloed) ||
+        this.isSuppressed(channel.id, step, time)
+      ) {
         continue;
       }
 

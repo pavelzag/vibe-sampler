@@ -60,6 +60,100 @@ button:disabled {
   gap: 18px;
 }
 
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(5, 7, 10, 0.76);
+  backdrop-filter: blur(5px);
+}
+
+.bank-dialog {
+  width: min(420px, 100%);
+  padding: 20px;
+  border: 1px solid #434852;
+  border-radius: 10px;
+  background: #16191e;
+  box-shadow: 0 22px 70px rgba(0, 0, 0, 0.55);
+  display: grid;
+  gap: 16px;
+}
+
+.bank-dialog p {
+  color: #aeb4bd;
+  font-size: 13px;
+}
+
+.bank-dialog label {
+  display: grid;
+  gap: 7px;
+  color: #c8cdd4;
+  font-size: 12px;
+}
+
+.bank-dialog input {
+  min-height: 40px;
+  padding: 0 11px;
+  border: 1px solid #3b4049;
+  border-radius: 8px;
+  background: #0d0f12;
+  color: #f2f0ea;
+  outline: none;
+}
+
+.bank-dialog input:focus {
+  border-color: #d8f05f;
+  box-shadow: 0 0 0 3px rgba(216, 240, 95, 0.12);
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+}
+
+.dialog-error {
+  padding: 9px 10px;
+  border: 1px solid rgba(255, 93, 93, 0.45);
+  border-radius: 8px;
+  background: rgba(255, 93, 93, 0.1);
+  color: #ff8c8c;
+  font-size: 12px;
+}
+
+.starter-dialog {
+  width: min(500px, 100%);
+}
+
+.starter-pack-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.starter-pack-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  border: 1px solid #30353d;
+  border-radius: 8px;
+  background: #101318;
+  color: #e5e8ec;
+  font-size: 13px;
+}
+
+.starter-pack-list small {
+  color: #8f97a3;
+  white-space: nowrap;
+}
+
 .topbar,
 .sequencer-head,
 footer {
@@ -249,6 +343,11 @@ footer,
   outline: 0;
 }
 
+.add-bank-button {
+  min-height: 40px;
+  padding: 0 10px;
+}
+
 .midi-channel-select select {
   min-width: 96px;
   background: transparent;
@@ -410,6 +509,41 @@ footer,
   font-size: 12px;
 }
 
+.recording-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.recording-source {
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid #383b42;
+  border-radius: 8px;
+  background: #101318;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #aeb4bd;
+  font-size: 11px;
+}
+
+.recording-source select {
+  max-width: 190px;
+  border: 0;
+  background: transparent;
+  color: #f2f0ea;
+  outline: 0;
+  text-overflow: ellipsis;
+}
+
+.source-refresh {
+  min-height: 38px;
+  padding: 0 9px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .transport-map {
   display: flex;
   flex-wrap: wrap;
@@ -441,6 +575,42 @@ footer,
   background: #0d0f12;
   touch-action: none;
   user-select: none;
+}
+
+.waveform-editor-heading {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px solid #30343c;
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0;
+  background: #101318;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.waveform-editor-heading + .waveform-editor {
+  border-radius: 0 0 8px 8px;
+}
+
+.waveform-editor-heading > div {
+  display: grid;
+  gap: 3px;
+}
+
+.waveform-editor-heading strong {
+  color: #f2f0ea;
+  font-size: 13px;
+}
+
+.waveform-editor-heading span {
+  color: #9299a3;
+  font-size: 11px;
+}
+
+.waveform-editor-heading button {
+  flex: 0 0 auto;
 }
 
 .waveform-editor.empty-wave {
@@ -489,6 +659,79 @@ footer,
 
 .sample-values:disabled {
   opacity: 0.45;
+}
+
+.sample-pitch-panel {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid #30343c;
+  border-radius: 8px;
+  background: #101318;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.sample-pitch-panel > div {
+  display: grid;
+  gap: 4px;
+}
+
+.sample-pitch-panel strong {
+  color: #f2f0ea;
+  font-size: 13px;
+}
+
+.sample-pitch-panel span,
+.sample-pitch-panel small {
+  color: #aeb4bd;
+  font-size: 11px;
+}
+
+.pitch-knob {
+  position: relative;
+  width: 76px;
+  flex: 0 0 76px;
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+}
+
+.pitch-knob-face {
+  width: 52px;
+  height: 52px;
+  border: 1px solid #4b515c;
+  border-radius: 50%;
+  background: radial-gradient(circle at 38% 32%, #3b414a, #171a20 68%);
+  box-shadow: inset 0 0 0 4px #20242b, 0 3px 9px rgba(0, 0, 0, 0.35);
+  transform: rotate(var(--pitch-angle));
+  cursor: ns-resize;
+  touch-action: none;
+  outline: none;
+}
+
+.pitch-knob-face:focus-visible {
+  border-color: #d8f05f;
+  box-shadow: inset 0 0 0 4px #20242b, 0 0 0 2px rgba(216, 240, 95, 0.35);
+}
+
+.pitch-knob-face i {
+  display: block;
+  width: 3px;
+  height: 18px;
+  margin: 4px auto 0;
+  border-radius: 2px;
+  background: #d8f05f;
+}
+
+.pitch-knob output {
+  color: #d8f05f;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+}
+
+.pitch-knob.disabled {
+  opacity: 0.4;
 }
 
 .waveform-bg {
@@ -601,16 +844,16 @@ input[type="range"] {
   fill: #66d4cf;
   stroke: #f2f0ea;
   stroke-width: 4;
-  cursor: grab;
+  cursor: move;
 }
 
 .envelope-dot:active {
-  cursor: grabbing;
+  cursor: move;
 }
 
 .envelope-dot-label {
   fill: #f2f0ea;
-  font-size: 26px;
+  font-size: 22px;
   font-weight: 800;
   pointer-events: none;
 }
@@ -651,6 +894,20 @@ input[type="range"] {
   background: #ff5d5d;
   border-color: #ff5d5d;
   color: #171010;
+  font-weight: 700;
+}
+
+.solo-button {
+  min-height: 30px;
+  padding: 0 8px;
+  justify-content: flex-start;
+  font-size: 12px;
+}
+
+.solo-button.soloed {
+  border-color: #d8f05f;
+  background: #d8f05f;
+  color: #12140d;
   font-weight: 700;
 }
 
