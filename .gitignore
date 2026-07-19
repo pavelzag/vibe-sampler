@@ -1,6 +1,8 @@
 node_modules/
 dist/
+release/
 .vite/
+gha-creds-*.json
 .samples/
 samples/
 .DS_Store

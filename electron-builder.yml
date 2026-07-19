@@ -1,0 +1,35 @@
+appId: com.pavelzag.vibesampler
+productName: Vibe Sampler
+directories:
+  output: release
+files:
+  - dist/**
+  - package.json
+asar: true
+compression: maximum
+artifactName: ${productName}-${version}-${arch}.${ext}
+mac:
+  target:
+    - target: dmg
+      arch:
+        - universal
+  category: public.app-category.music
+  minimumSystemVersion: "12.0"
+  hardenedRuntime: true
+  notarize: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  extendInfo:
+    NSMicrophoneUsageDescription: Vibe Sampler records audio into your sample packs.
+    NSAppleEventsUsageDescription: Vibe Sampler uses system services while creating and managing audio.
+dmg:
+  sign: false
+  title: Vibe Sampler ${version}
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications

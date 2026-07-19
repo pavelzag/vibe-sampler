@@ -8,9 +8,11 @@ import {
   Mic,
   Pause,
   Play,
+  Plus,
   Radio,
   RotateCcw,
   Scissors,
+  Upload,
   Wand2
 } from "lucide-react";
 import {
@@ -21,11 +23,17 @@ import {
   SamplerEngine,
   createChannels,
   createDefaultFxParams,
+  encodeWav,
   formatFxParamValue,
   getEnvelopeDuration,
   midiNoteName
 } from "./audio";
-import { applyBankToChannels, defaultBankId, loadSoundBank, soundBanks } from "./banks";
+import {
+  applyUserBankToChannels,
+  loadUserSoundBank,
+  selectedUserBankId,
+  userBankSelectionId
+} from "./banks";
 import { installRendererErrorLogging, logError, logInfo, logWarn } from "./logger";
 import { MidiActivity, MidiControlMessage, MidiManager, MidiStatus } from "./midi";
 import { applyPatternPreset, defaultPatternId, findPatternPreset, patternPresets, patternStepCount } from "./patterns";
@@ -37,8 +45,10 @@ installRendererErrorLogging();
 const engine = createSamplerEngine();
 const muteKeys = ["q", "w", "e", "r", "t", "y", "u", "i"];
 const triggerKeys = ["a", "s", "d", "f", "g", "h", "j", "k"];
+const alternateTriggerKeys = ["z", "x", "c", "v", "b", "n", "m", "<"];
 const muteKeyCodes = ["KeyQ", "KeyW", "KeyE", "KeyR", "KeyT", "KeyY", "KeyU", "KeyI"];
 const triggerKeyCodes = ["KeyA", "KeyS", "KeyD", "KeyF", "KeyG", "KeyH", "KeyJ", "KeyK"];
+const alternateTriggerKeyCodes = ["KeyZ", "KeyX", "KeyC", "KeyV", "KeyB", "KeyN", "KeyM", "Comma"];
 const defaultVolumeControls = [
   "VCO2 pitch",
   "VCO2 shape",
@@ -116,11 +126,22 @@ function App(): React.JSX.Element {
   const [channels, setChannels] = useState<Channel[]>(() => applyPatternPreset(createChannels(), findPatternPreset(defaultPatternId)));
   const [activeChannelId, setActiveChannelId] = useState(0);
   const [isRecording, setIsRecording] = useState(false);
+  const [recordingSources, setRecordingSources] = useState<MediaDeviceInfo[]>([]);
+  const [selectedRecordingSourceId, setSelectedRecordingSourceId] = useState("");
+  const [isDiscoveringRecordingSources, setIsDiscoveringRecordingSources] = useState(false);
   const [isPatternRecordArmed, setIsPatternRecordArmed] = useState(false);
   const [isPatternCountIn, setIsPatternCountIn] = useState(false);
   const [isPatternRecording, setIsPatternRecording] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [selectedBankId, setSelectedBankId] = useState(defaultBankId);
+  const [selectedBankId, setSelectedBankId] = useState("");
+  const [userBanks, setUserBanks] = useState<UserSoundBank[]>([]);
+  const [cloudOnboarding, setCloudOnboarding] = useState<CloudSampleOnboarding | null>(null);
+  const [isStarterImporting, setIsStarterImporting] = useState(false);
+  const [starterImportError, setStarterImportError] = useState("");
+  const [sampleLibraryRoot, setSampleLibraryRoot] = useState("");
+  const [isBankCreatorOpen, setIsBankCreatorOpen] = useState(false);
+  const [newBankName, setNewBankName] = useState("");
+  const [bankCreationError, setBankCreationError] = useState("");
   const [selectedPatternId, setSelectedPatternId] = useState(defaultPatternId);
   const [isBankLoading, setIsBankLoading] = useState(false);
   const [tempo, setTempo] = useState(() => findPatternPreset(defaultPatternId).tempo);
@@ -152,7 +173,9 @@ function App(): React.JSX.Element {
   const isPatternCountInRef = useRef(isPatternCountIn);
   const isPatternRecordingRef = useRef(isPatternRecording);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const sampleFileInputRef = useRef<HTMLInputElement | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const sampleEditSaveTimersRef = useRef<Map<string, number>>(new Map());
   const midiRef = useRef<MidiManager | null>(null);
   const transportRef = useRef<TransportScheduler | null>(null);
   const recordingTouchedChannelsRef = useRef<Set<number>>(new Set());
@@ -177,6 +200,7 @@ function App(): React.JSX.Element {
   );
 
   const activeChannel = channels[activeChannelId];
+  const hasSoloedChannels = channels.some((channel) => channel.soloed);
   const activeSampleDuration = activeChannel.sample?.buffer.duration ?? 0;
   const activeTrimDuration = activeChannel.sample
     ? Math.max(0.02, activeChannel.sample.trimEnd - activeChannel.sample.trimStart)
@@ -194,10 +218,12 @@ function App(): React.JSX.Element {
   useEffect(() => {
     channelsRef.current = channels;
     volumeControlMapRef.current = channels.map((channel) => toStoredControl(channel.levelControlKey, channel.levelControlLabel));
+    const hasSoloedChannels = channels.some((channel) => channel.soloed);
     channels.forEach((channel) => {
       const previous = engineChannelMixRef.current[channel.id];
-      if (!previous || previous.level !== channel.level) {
-        engine.setChannelLevel(channel.id, channel.level);
+      const effectiveLevel = channel.muted || (hasSoloedChannels && !channel.soloed) ? 0 : channel.level;
+      if (!previous || previous.level !== effectiveLevel) {
+        engine.setChannelLevel(channel.id, effectiveLevel);
       }
       if (!previous || previous.pan !== channel.pan) {
         engine.setChannelPan(channel.id, channel.pan);
@@ -210,7 +236,7 @@ function App(): React.JSX.Element {
       });
     });
     engineChannelMixRef.current = channels.map((channel) => ({
-      level: channel.level,
+      level: channel.muted || (hasSoloedChannels && !channel.soloed) ? 0 : channel.level,
       pan: channel.pan,
       fxSends: { ...channel.fxSends }
     }));
@@ -399,18 +425,32 @@ function App(): React.JSX.Element {
   const loadBank = useCallback(async (bankId: string) => {
     logInfo("Loading sound bank", { bankId });
     setIsBankLoading(true);
-    setMessage(`Loading ${soundBanks.find((bank) => bank.id === bankId)?.name ?? "sound bank"}`);
+    setMessage("Loading sound bank");
     try {
-      const samples = await loadSoundBank(engine, bankId);
-      setChannels((current) => applyBankToChannels(current, bankId, samples));
+      const userBankId = selectedUserBankId(bankId);
+      if (!userBankId) {
+        throw new Error("Choose a local sample pack");
+      }
+      const { bank, samples, envelopes } = await loadUserSoundBank(engine, userBankId);
+      setChannels((current) => applyUserBankToChannels(current, samples, envelopes));
+      setUserBanks((current) => [...current.filter((item) => item.id !== bank.id), bank].sort((a, b) => a.name.localeCompare(b.name)));
       setSelectedBankId(bankId);
-      logInfo("Sound bank loaded", { bankId, sampleCount: samples.length });
-      setMessage(`${soundBanks.find((bank) => bank.id === bankId)?.name ?? "Sound bank"} loaded`);
+      setMessage(`${bank.name} loaded`);
     } catch (error) {
       logError("Sound bank failed to load", { bankId, error });
       setMessage(error instanceof Error ? error.message : "Could not load sound bank");
     } finally {
       setIsBankLoading(false);
+    }
+  }, []);
+
+  const refreshUserBanks = useCallback(async () => {
+    try {
+      const library = await window.vibeSampler.listUserBanks();
+      setUserBanks(library.banks);
+      setSampleLibraryRoot(library.root);
+    } catch (error) {
+      logWarn("Could not list user sound banks", error);
     }
   }, []);
 
@@ -431,6 +471,10 @@ function App(): React.JSX.Element {
 
   const triggerChannel = useCallback((channelId: number, velocity = 1, selectChannel = false, pulseWhenSilent = false) => {
     const channel = channelsRef.current[channelId];
+    const hasSoloedChannels = channelsRef.current.some((item) => item.soloed);
+    if (hasSoloedChannels && !channel.soloed) {
+      return;
+    }
     const didPlay = engine.isRunning()
       ? engine.play(channel, velocity)
       : (engine.resumeSoon(), engine.play(channel, velocity));
@@ -477,6 +521,24 @@ function App(): React.JSX.Element {
   }, []);
 
   useEffect(() => {
+    const refreshRecordingSources = async () => {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const audioInputs = devices.filter((device) => device.kind === "audioinput");
+        setRecordingSources(audioInputs);
+        setSelectedRecordingSourceId((current) =>
+          current && audioInputs.some((device) => device.deviceId === current) ? current : ""
+        );
+      } catch (error) {
+        logWarn("Could not enumerate recording sources", error);
+      }
+    };
+    void refreshRecordingSources();
+    navigator.mediaDevices.addEventListener("devicechange", refreshRecordingSources);
+    return () => navigator.mediaDevices.removeEventListener("devicechange", refreshRecordingSources);
+  }, []);
+
+  useEffect(() => {
     const handleChannelKey = (event: KeyboardEvent) => {
       if (
         event.code === "Escape" &&
@@ -485,6 +547,22 @@ function App(): React.JSX.Element {
         event.preventDefault();
         event.stopPropagation();
         transportRef.current?.cancelRecording();
+        return;
+      }
+
+      const primaryTriggerChannelId = triggerKeyCodes.indexOf(event.code);
+      const alternateTriggerChannelId = event.key === "<" ? 7 : alternateTriggerKeyCodes.indexOf(event.code);
+      const triggerChannelId = primaryTriggerChannelId !== -1 ? primaryTriggerChannelId : alternateTriggerChannelId;
+      const isFxShortcut = event.code === "KeyN" && event.shiftKey;
+      if (triggerChannelId !== -1 && !isFxShortcut && !isTextEntryTarget(event.target)) {
+        event.preventDefault();
+        event.stopPropagation();
+        triggerChannel(triggerChannelId, 1, true, true);
+        recordPatternHit(triggerChannelId);
+        return;
+      }
+
+      if (isEditableTarget(event.target)) {
         return;
       }
 
@@ -520,19 +598,19 @@ function App(): React.JSX.Element {
         return;
       }
 
-      if (event.code === "KeyN") {
+      if (event.code === "KeyN" && event.shiftKey) {
         event.preventDefault();
         event.stopPropagation();
         toggleFxCcOverride();
         return;
       }
 
-      const triggerChannelId = triggerKeyCodes.indexOf(event.code);
-      if (triggerChannelId !== -1) {
+      const soloChannelId = [...Array.from({ length: 8 }, (_, index) => `Digit${index + 1}`), ...Array.from({ length: 8 }, (_, index) => `Numpad${index + 1}`)].indexOf(event.code);
+      if (soloChannelId !== -1 && !isEditableTarget(event.target)) {
         event.preventDefault();
         event.stopPropagation();
-        triggerChannel(triggerChannelId, 1, true, true);
-        recordPatternHit(triggerChannelId);
+        const channelId = soloChannelId % 8;
+        updateChannel(channelId, (channel) => ({ ...channel, soloed: !channel.soloed }));
         return;
       }
 
@@ -747,8 +825,111 @@ function App(): React.JSX.Element {
   }, []);
 
   useEffect(() => {
-    void loadBank(defaultBankId);
-  }, [loadBank]);
+    void refreshUserBanks();
+    void window.vibeSampler.getCloudSampleOnboarding()
+      .then((onboarding) => {
+        if (onboarding.shouldPrompt) {
+          setCloudOnboarding(onboarding);
+        }
+      })
+      .catch((error) => logWarn("Could not check starter sample catalog", error));
+  }, [refreshUserBanks]);
+
+  async function declineStarterSamples(): Promise<void> {
+    await window.vibeSampler.declineCloudSamples();
+    setCloudOnboarding(null);
+    setMessage("Starting with an empty sampler");
+  }
+
+  async function importStarterSamples(): Promise<void> {
+    setIsStarterImporting(true);
+    setStarterImportError("");
+    try {
+      const banks = await window.vibeSampler.importCloudSamples();
+      setUserBanks((current) => [...current.filter((item) => !banks.some((bank) => bank.id === item.id)), ...banks]
+        .sort((left, right) => left.name.localeCompare(right.name)));
+      setCloudOnboarding(null);
+      if (banks[0]) {
+        await loadBank(userBankSelectionId(banks[0].id));
+      }
+      setMessage(`Added ${banks.length} starter sample pack${banks.length === 1 ? "" : "s"}`);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Could not download starter samples";
+      setStarterImportError(detail);
+      setMessage(detail);
+    } finally {
+      setIsStarterImporting(false);
+    }
+  }
+
+  async function createUserBank(): Promise<void> {
+    const requestedName = newBankName.trim();
+    if (!requestedName) {
+      setBankCreationError("Enter a name for the new sound bank.");
+      return;
+    }
+    try {
+      setBankCreationError("");
+      const bank = await window.vibeSampler.createUserBank(requestedName);
+      setUserBanks((current) => [...current, bank].sort((a, b) => a.name.localeCompare(b.name)));
+      setSelectedBankId(userBankSelectionId(bank.id));
+      setChannels((current) => applyUserBankToChannels(current, Array.from({ length: 8 }, () => null)));
+      setNewBankName("");
+      setIsBankCreatorOpen(false);
+      setMessage(`Created ${bank.name} in ${sampleLibraryRoot || "the sample library"}`);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Could not create sound bank";
+      setBankCreationError(detail);
+      setMessage(detail);
+    }
+  }
+
+  async function writableBank(): Promise<UserSoundBank> {
+    const selectedId = selectedUserBankId(selectedBankId);
+    const selected = selectedId ? userBanks.find((bank) => bank.id === selectedId) : null;
+    if (selected) {
+      return selected;
+    }
+    const existing = userBanks.find((bank) => bank.name.toLowerCase() === "recordings");
+    if (existing) {
+      setSelectedBankId(userBankSelectionId(existing.id));
+      return existing;
+    }
+    const bank = await window.vibeSampler.createUserBank("Recordings");
+    setUserBanks((current) => [...current, bank].sort((a, b) => a.name.localeCompare(b.name)));
+    setSelectedBankId(userBankSelectionId(bank.id));
+    return bank;
+  }
+
+  async function saveSampleToLibrary(sample: Sample, slot: number): Promise<void> {
+    const bank = await writableBank();
+    const manifest = await window.vibeSampler.saveUserSample({
+      bankId: bank.id,
+      slot,
+      name: sample.name,
+      wavData: encodeWav(sample.buffer),
+      detectedPitch: sample.detectedPitch,
+      pitchSemitones: sample.pitchSemitones,
+      trimStart: sample.trimStart,
+      trimEnd: sample.trimEnd,
+      envelope: channelsRef.current[slot]?.envelope
+    });
+    setUserBanks((current) => [...current.filter((item) => item.id !== manifest.id), manifest].sort((a, b) => a.name.localeCompare(b.name)));
+    setSelectedBankId(userBankSelectionId(bank.id));
+  }
+
+  async function importSample(file: File): Promise<void> {
+    try {
+      const name = file.name.replace(/\.[^.]+$/, "");
+      const sample = await engine.decode(file, name, { detectPitch: true });
+      setSample(activeChannelId, sample);
+      await saveSampleToLibrary(sample, activeChannelId);
+      setMessage(`Imported ${sample.name}${sample.detectedPitch ? ` · ${sample.detectedPitch.note}` : " · pitch not detected"}`);
+    } catch (error) {
+      logError("Could not import sample", error);
+      setMessage(error instanceof Error ? error.message : "Could not import sample");
+    }
+  }
 
   async function toggleRecording(): Promise<void> {
     logInfo("Toggling recording", { isRecording, activeChannelId });
@@ -768,7 +949,13 @@ function App(): React.JSX.Element {
 
     let stream: MediaStream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: selectedRecordingSourceId
+          ? { deviceId: { exact: selectedRecordingSourceId } }
+          : true
+      });
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      setRecordingSources(devices.filter((device) => device.kind === "audioinput"));
       logInfo("Microphone stream acquired", { trackCount: stream.getTracks().length });
     } catch (error) {
       logError("Could not acquire microphone stream", error);
@@ -789,10 +976,13 @@ function App(): React.JSX.Element {
       const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
       try {
         logInfo("Recording stopped, decoding sample", { size: blob.size, type: blob.type });
-        const sample = await engine.decode(blob, `${activeChannel.name} take`);
+        const sample = await engine.decode(blob, `${activeChannel.name} take`, { detectPitch: true });
         updateChannel(activeChannelId, (channel) => ({ ...channel, sample }));
+        await saveSampleToLibrary(sample, activeChannelId);
         logInfo("Recorded sample decoded", { duration: sample.buffer.duration, channels: sample.buffer.numberOfChannels });
-        setMessage(`Recorded ${sample.name} (${sample.buffer.duration.toFixed(2)}s)`);
+        setMessage(
+          `Recorded ${sample.name} (${sample.buffer.duration.toFixed(2)}s)${sample.detectedPitch ? ` · ${sample.detectedPitch.note}` : ""}`
+        );
       } catch (error) {
         logError("Could not decode recorded sample", error);
         setMessage(error instanceof Error ? error.message : "Could not decode recording");
@@ -804,8 +994,89 @@ function App(): React.JSX.Element {
     setMessage(`Recording into ${activeChannel.name}`);
   }
 
+  async function discoverRecordingSources(): Promise<void> {
+    setIsDiscoveringRecordingSources(true);
+    try {
+      const permissionStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      permissionStream.getTracks().forEach((track) => track.stop());
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      setRecordingSources(devices.filter((device) => device.kind === "audioinput"));
+      setMessage("Recording inputs refreshed");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not access recording inputs");
+    } finally {
+      setIsDiscoveringRecordingSources(false);
+    }
+  }
+
   function setSample(channelId: number, sample: Sample | null): void {
     updateChannel(channelId, (channel) => ({ ...channel, sample }));
+  }
+
+  function scheduleSampleEditPersistence(channelId: number, sample: Sample, envelope: Channel["envelope"]): void {
+    const bankId = selectedUserBankId(selectedBankId);
+    if (!bankId) {
+      return;
+    }
+
+    const key = `${bankId}:${channelId}`;
+    const pending = sampleEditSaveTimersRef.current.get(key);
+    if (pending !== undefined) {
+      window.clearTimeout(pending);
+    }
+    const timer = window.setTimeout(async () => {
+      sampleEditSaveTimersRef.current.delete(key);
+      try {
+        const manifest = await window.vibeSampler.setUserSampleEdit({
+          bankId,
+          slot: channelId,
+          trimStart: sample.trimStart,
+          trimEnd: sample.trimEnd,
+          envelope
+        });
+        setUserBanks((current) => [...current.filter((bank) => bank.id !== manifest.id), manifest].sort((a, b) => a.name.localeCompare(b.name)));
+      } catch (error) {
+        logWarn("Could not persist sample trim and envelope", error);
+      }
+    }, 220);
+    sampleEditSaveTimersRef.current.set(key, timer);
+  }
+
+  async function updateSamplePitch(semitones: number): Promise<void> {
+    if (!activeChannel.sample) {
+      return;
+    }
+    setSample(activeChannelId, { ...activeChannel.sample, pitchSemitones: semitones });
+    const bankId = selectedUserBankId(selectedBankId);
+    if (bankId) {
+      try {
+        const manifest = await window.vibeSampler.setUserSamplePitch({
+          bankId,
+          slot: activeChannelId,
+          pitchSemitones: semitones
+        });
+        setUserBanks((current) => [...current.filter((bank) => bank.id !== manifest.id), manifest].sort((a, b) => a.name.localeCompare(b.name)));
+      } catch (error) {
+        logWarn("Could not persist sample pitch", error);
+      }
+    }
+  }
+
+  async function cropActiveSample(): Promise<void> {
+    if (!activeChannel.sample) {
+      return;
+    }
+    try {
+      const cropped = engine.crop(activeChannel.sample);
+      setSample(activeChannelId, cropped);
+      await saveSampleToLibrary(cropped, activeChannelId);
+      setMessage(
+        `Cropped ${cropped.name} to ${cropped.buffer.duration.toFixed(3)}s${cropped.detectedPitch ? ` · ${cropped.detectedPitch.note}` : ""}`
+      );
+    } catch (error) {
+      logError("Could not crop sample", error);
+      setMessage(error instanceof Error ? error.message : "Could not crop sample");
+    }
   }
 
   function adjustTrim(field: "trimStart" | "trimEnd", rawValue: number): void {
@@ -825,20 +1096,29 @@ function App(): React.JSX.Element {
     }
 
     setSample(activeChannelId, next);
+    scheduleSampleEditPersistence(activeChannelId, next, activeChannel.envelope);
+  }
+
+  function applyActiveEnvelope(envelope: Channel["envelope"]): void {
+    updateEnvelope(activeChannelId, envelope);
+    if (activeChannel.sample) {
+      scheduleSampleEditPersistence(activeChannelId, activeChannel.sample, envelope);
+    }
   }
 
   function adjustEnvelopeValue(field: "attack" | "release", rawValue: number): void {
     const minimumGap = 0.02;
     if (field === "attack") {
       const attack = clamp(rawValue, 0, Math.max(0, activeTrimDuration - minimumGap));
-      updateEnvelope(activeChannelId, {
+      applyActiveEnvelope({
+        ...activeChannel.envelope,
         attack,
         release: clamp(Math.max(activeChannel.envelope.release, attack + minimumGap), minimumGap, activeTrimDuration)
       });
       return;
     }
 
-    updateEnvelope(activeChannelId, {
+    applyActiveEnvelope({
       ...activeChannel.envelope,
       release: clamp(rawValue, activeChannel.envelope.attack + minimumGap, activeTrimDuration)
     });
@@ -963,6 +1243,70 @@ function App(): React.JSX.Element {
 
   return (
     <main className="app">
+      {cloudOnboarding ? (
+        <div className="dialog-backdrop" role="presentation">
+          <section className="bank-dialog starter-dialog" role="dialog" aria-modal="true" aria-labelledby="starter-title">
+            <h2 id="starter-title">Start with sample packs?</h2>
+            <p>
+              Download the free starter sounds into your local packs. You can also start empty and use only your own
+              recordings and samples.
+            </p>
+            <ul className="starter-pack-list">
+              {cloudOnboarding.banks.map((bank) => (
+                <li key={bank.name}><span>{bank.name}</span><small>{bank.sampleCount} samples</small></li>
+              ))}
+            </ul>
+            {starterImportError ? <div className="dialog-error">{starterImportError}</div> : null}
+            <div className="dialog-actions">
+              <button type="button" disabled={isStarterImporting} onClick={() => void declineStarterSamples()}>
+                Start empty
+              </button>
+              <button className="primary" type="button" disabled={isStarterImporting} onClick={() => void importStarterSamples()}>
+                {isStarterImporting ? "Downloading…" : "Add sample packs"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+      {isBankCreatorOpen ? (
+        <div className="dialog-backdrop" role="presentation" onPointerDown={() => setIsBankCreatorOpen(false)}>
+          <form
+            className="bank-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="new-bank-title"
+            onPointerDown={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.stopPropagation();
+                setIsBankCreatorOpen(false);
+              }
+            }}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void createUserBank();
+            }}
+          >
+            <h2 id="new-bank-title">New sound bank</h2>
+            <p>Samples will be saved as WAV files in this bank’s library folder.</p>
+            <label>
+              <span>Bank name</span>
+              <input
+                autoFocus
+                value={newBankName}
+                maxLength={80}
+                placeholder="My drum kit"
+                onChange={(event) => setNewBankName(event.target.value)}
+              />
+            </label>
+            {bankCreationError ? <div className="dialog-error">{bankCreationError}</div> : null}
+            <div className="dialog-actions">
+              <button type="button" onClick={() => setIsBankCreatorOpen(false)}>Cancel</button>
+              <button className="primary" type="submit" disabled={!newBankName.trim()}>Create bank</button>
+            </div>
+          </form>
+        </div>
+      ) : null}
       <header className="topbar">
         <div>
           <h1>Vibe Sampler</h1>
@@ -986,13 +1330,29 @@ function App(): React.JSX.Element {
               disabled={isBankLoading}
               onChange={(event) => void loadBank(event.target.value)}
             >
-              {soundBanks.map((bank) => (
-                <option key={bank.id} value={bank.id}>
-                  {bank.name}
-                </option>
-              ))}
+              <option value="" disabled>{userBanks.length ? "Choose pack" : "No packs yet"}</option>
+              {userBanks.length ? (
+                <optgroup label="Local packs">
+                  {userBanks.map((bank) => (
+                    <option key={bank.id} value={userBankSelectionId(bank.id)}>
+                      {bank.name}
+                    </option>
+                  ))}
+                </optgroup>
+              ) : null}
             </select>
           </label>
+          <button
+            className="add-bank-button"
+            onClick={() => {
+              setBankCreationError("");
+              setIsBankCreatorOpen(true);
+            }}
+            title={sampleLibraryRoot || "Add user bank"}
+          >
+            <Plus size={15} />
+            Bank
+          </button>
           <button className={isPlaying ? "primary active" : "primary"} onClick={togglePlayback}>
             {isPlaying ? <Pause size={18} /> : <Play size={18} />}
             {isPlaying ? "Stop" : "Play"}
@@ -1059,17 +1419,19 @@ function App(): React.JSX.Element {
         <aside className="channels">
           {channels.map((channel) => (
             <button
-              className={channel.id === activeChannelId ? "channel selected" : "channel"}
+              className={`channel${channel.id === activeChannelId ? " selected" : ""}${channel.soloed ? " soloed" : ""}`}
               key={channel.id}
               onClick={() => setActiveChannelId(channel.id)}
-              style={{ "--level": channel.muted ? 0 : channel.level } as React.CSSProperties}
+              style={{
+                "--level": channel.muted || (hasSoloedChannels && !channel.soloed) ? 0 : channel.level
+              } as React.CSSProperties}
             >
               <span className="channel-hit" key={channelHitTicks[channel.id]} />
               <span className="channel-level-fill" />
               <span className="channel-index">{channel.id + 1}</span>
               <span className="channel-name">{channel.name}</span>
               <span className="channel-note">
-                {triggerKeys[channel.id].toUpperCase()} / {midiNoteName(channel.note)}
+                {triggerKeys[channel.id].toUpperCase()} · {alternateTriggerKeys[channel.id].toUpperCase()} / {midiNoteName(channel.note)}
               </span>
             </button>
           ))}
@@ -1082,9 +1444,52 @@ function App(): React.JSX.Element {
                 <h2>{activeChannel.name}</h2>
                 <p>{activeChannel.sample ? `${activeChannel.sample.buffer.duration.toFixed(2)}s sample` : "No sample loaded"}</p>
               </div>
-              <button className={isRecording ? "danger active" : "primary"} onClick={() => void toggleRecording()}>
-                {isRecording ? <Circle size={18} fill="currentColor" /> : <Mic size={18} />}
-                {isRecording ? "Stop" : "Record"}
+              <div className="recording-controls">
+                <label className="recording-source">
+                  <span>Input</span>
+                  <select
+                    value={selectedRecordingSourceId}
+                    disabled={isRecording}
+                    onChange={(event) => setSelectedRecordingSourceId(event.target.value)}
+                  >
+                    <option value="">System default</option>
+                    {recordingSources.map((source, index) => (
+                      <option value={source.deviceId} key={source.deviceId || index}>
+                        {source.label || `Audio input ${index + 1}`}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  className="source-refresh"
+                  type="button"
+                  disabled={isRecording || isDiscoveringRecordingSources}
+                  onClick={() => void discoverRecordingSources()}
+                >
+                  {isDiscoveringRecordingSources ? "Scanning…" : "Find inputs"}
+                </button>
+                <button className={isRecording ? "danger active" : "primary"} onClick={() => void toggleRecording()}>
+                  {isRecording ? <Circle size={18} fill="currentColor" /> : <Mic size={18} />}
+                  {isRecording ? "Stop" : "Record"}
+                </button>
+              </div>
+            </div>
+
+            <div className="waveform-editor-heading">
+              <div>
+                <strong>Trim / envelope editor</strong>
+                <span>Drag START and END to cut. Drag A and R sideways for time or vertically for level. Edits save automatically.</span>
+              </div>
+              <button
+                onClick={() => void cropActiveSample()}
+                disabled={
+                  !activeChannel.sample ||
+                  (activeChannel.sample.trimStart <= 0 && activeChannel.sample.trimEnd >= activeChannel.sample.buffer.duration)
+                }
+                title="Write a new WAV containing only the selected region"
+              >
+                <Scissors size={16} />
+                Crop selection
               </button>
             </div>
 
@@ -1093,8 +1498,25 @@ function App(): React.JSX.Element {
               waveform={waveform}
               envelope={activeChannel.envelope}
               onTrimChange={adjustTrim}
-              onEnvelopeChange={(envelope) => updateEnvelope(activeChannelId, envelope)}
+              onEnvelopeChange={applyActiveEnvelope}
             />
+
+            <div className="sample-pitch-panel">
+              <PitchKnob
+                value={activeChannel.sample?.pitchSemitones ?? 0}
+                disabled={!activeChannel.sample}
+                onCommit={(value) => void updateSamplePitch(value)}
+              />
+              <div>
+                <strong>Pitch</strong>
+                <span>
+                  {activeChannel.sample?.detectedPitch
+                    ? `Detected ${activeChannel.sample.detectedPitch.note} · ${activeChannel.sample.detectedPitch.frequency.toFixed(1)} Hz · ${formatCents(activeChannel.sample.detectedPitch.cents)}`
+                    : "No stable pitch detected"}
+                </span>
+                <small>Transpose ±24 semitones</small>
+              </div>
+            </div>
 
             <fieldset className="sample-values" disabled={!activeChannel.sample}>
               <legend>Sample values</legend>
@@ -1161,6 +1583,23 @@ function App(): React.JSX.Element {
             </fieldset>
 
             <div className="tool-row">
+              <input
+                ref={sampleFileInputRef}
+                type="file"
+                accept="audio/*,.wav,.aif,.aiff,.mp3,.flac,.ogg"
+                hidden
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) {
+                    void importSample(file);
+                  }
+                  event.target.value = "";
+                }}
+              />
+              <button onClick={() => sampleFileInputRef.current?.click()}>
+                <Upload size={16} />
+                Import
+              </button>
               <button onClick={() => triggerChannel(activeChannelId, 1, true)} disabled={!activeChannel.sample}>
                 <Play size={16} />
                 Audition
@@ -1278,6 +1717,12 @@ function App(): React.JSX.Element {
                   >
                     <MicOff size={13} />
                     {channel.muted ? "Muted" : "Mute"}
+                  </button>
+                  <button
+                    className={channel.soloed ? "solo-button soloed" : "solo-button"}
+                    onClick={() => updateChannel(channel.id, (item) => ({ ...item, soloed: !item.soloed }))}
+                  >
+                    Solo {channel.id + 1}
                   </button>
                   <label title={`Level ${Math.round(channel.level * 100)}%`}>
                     <span>Vol</span>
@@ -1438,10 +1883,11 @@ function App(): React.JSX.Element {
         <span>F8: arm count-in recording</span>
         <span>Esc: stop recording</span>
         <span>Command+Up/Down: recording row</span>
-        <span>Play keys: a s d f g h j k</span>
+        <span>Play keys: a s d f g h j k · z x c v b n m &lt;</span>
         <span>Mute keys: q w e r t y u i</span>
+        <span>Solo keys: 1 2 3 4 5 6 7 8</span>
         <span>CC 25 attack, CC 26 release, CC 36 FX sends</span>
-        <span>N: toggle CC 35/39/43 between channel levels and FX parameters</span>
+        <span>Shift+N: toggle CC 35/39/43 between channel levels and FX parameters</span>
         <span>Attack controls swing, Master Volume controls master amplitude after binding</span>
         <span>Audio latency: {audioLatencyMs ? `${audioLatencyMs.toFixed(1)} ms` : "unknown"}</span>
       </footer>
@@ -1503,6 +1949,83 @@ const ParameterSlider = React.memo(function ParameterSlider({
   );
 });
 
+const PitchKnob = React.memo(function PitchKnob({
+  value,
+  disabled,
+  onCommit
+}: {
+  value: number;
+  disabled: boolean;
+  onCommit: (value: number) => void;
+}): React.JSX.Element {
+  const [draft, setDraft] = useState(value);
+  const draftRef = useRef(value);
+  const dragRef = useRef<{ pointerId: number; startY: number; startValue: number } | null>(null);
+  useEffect(() => {
+    draftRef.current = value;
+    setDraft(value);
+  }, [value]);
+  const commit = () => onCommit(draftRef.current);
+  const setKnobValue = (nextValue: number) => {
+    const next = clamp(Math.round(nextValue), -24, 24);
+    draftRef.current = next;
+    setDraft(next);
+  };
+  return (
+    <div className={disabled ? "pitch-knob disabled" : "pitch-knob"}>
+      <span
+        className="pitch-knob-face"
+        style={{ "--pitch-angle": `${(draft / 24) * 135}deg` } as React.CSSProperties}
+        role="slider"
+        tabIndex={disabled ? -1 : 0}
+        aria-label="Sample pitch in semitones"
+        aria-valuemin={-24}
+        aria-valuemax={24}
+        aria-valuenow={draft}
+        title="Drag up or down to transpose · double-click to reset"
+        onPointerDown={(event) => {
+          if (disabled) return;
+          event.preventDefault();
+          event.currentTarget.setPointerCapture(event.pointerId);
+          dragRef.current = { pointerId: event.pointerId, startY: event.clientY, startValue: draftRef.current };
+        }}
+        onPointerMove={(event) => {
+          const drag = dragRef.current;
+          if (!drag || drag.pointerId !== event.pointerId) return;
+          const pixelsPerSemitone = event.shiftKey ? 12 : 5;
+          setKnobValue(drag.startValue + (drag.startY - event.clientY) / pixelsPerSemitone);
+        }}
+        onPointerUp={(event) => {
+          if (dragRef.current?.pointerId !== event.pointerId) return;
+          dragRef.current = null;
+          commit();
+        }}
+        onPointerCancel={() => {
+          dragRef.current = null;
+          commit();
+        }}
+        onDoubleClick={() => {
+          if (disabled) return;
+          setKnobValue(0);
+          onCommit(0);
+        }}
+        onKeyDown={(event) => {
+          if (disabled || !["ArrowUp", "ArrowRight", "ArrowDown", "ArrowLeft", "Home"].includes(event.key)) return;
+          event.preventDefault();
+          if (event.key === "Home") setKnobValue(0);
+          else setKnobValue(draftRef.current + (["ArrowUp", "ArrowRight"].includes(event.key) ? 1 : -1));
+        }}
+        onKeyUp={(event) => {
+          if (["ArrowUp", "ArrowRight", "ArrowDown", "ArrowLeft", "Home"].includes(event.key)) commit();
+        }}
+      >
+        <i />
+      </span>
+      <output>{draft > 0 ? `+${draft}` : draft} st</output>
+    </div>
+  );
+});
+
 const rootElement = document.getElementById("root");
 if (!rootElement) {
   logError("Could not mount React app because #root is missing");
@@ -1546,8 +2069,8 @@ function WaveformEditor({
   const trimEndX = timeToX(trimEnd);
 
   const points = [
-    { id: "attack", label: "A", x: envelopeTimeToX(attackTime), y: ampToY(1) },
-    { id: "release", label: "R", x: envelopeTimeToX(releaseTime), y: ampToY(0) }
+    { id: "attack", label: "A", level: clamp(envelope.attackLevel ?? 1, 0, 1), x: envelopeTimeToX(attackTime), y: ampToY(envelope.attackLevel ?? 1) },
+    { id: "release", label: "R", level: clamp(envelope.releaseLevel ?? 0, 0, 1), x: envelopeTimeToX(releaseTime), y: ampToY(envelope.releaseLevel ?? 0) }
   ] as const;
 
   const path = [
@@ -1622,16 +2145,19 @@ function WaveformEditor({
       return;
     }
 
-    const { x } = pointerToSvgPoint(event, svg);
+    const { x, y } = pointerToSvgPoint(event, svg);
     const time = xToEnvelopeTime(x);
+    const level = clamp(1 - (y - padding) / graphHeight, 0, 1);
     const next = { ...envelope };
 
     if (pointId === "attack") {
-      next.attack = clamp(time, 0, maxSeconds);
+      next.attack = clamp(time, 0, Math.max(0, releaseTime - 0.02));
+      next.attackLevel = level;
     }
 
     if (pointId === "release") {
-      next.release = clamp(time, 0, maxSeconds);
+      next.release = clamp(time, attackTime + 0.02, maxSeconds);
+      next.releaseLevel = level;
     }
 
     onEnvelopeChange(next);
@@ -1717,8 +2243,8 @@ function WaveformEditor({
             onPointerDown={(event) => handlePointerDown(point.id, event)}
             onPointerMove={(event) => handlePointerMove(point.id, event)}
           />
-          <text className="envelope-dot-label" x={clamp(point.x, 16, width - 16)} y={Math.max(17, point.y - 22)} textAnchor="middle">
-            {point.label}
+          <text className="envelope-dot-label" x={clamp(point.x, 55, width - 55)} y={Math.max(17, point.y - 22)} textAnchor="middle">
+            {point.label} {Math.round(point.level * 100)}%
           </text>
         </g>
       ))}
@@ -1812,6 +2338,20 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+function isEditableTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLSelectElement || isTextEntryTarget(target);
+}
+
+function isTextEntryTarget(target: EventTarget | null): boolean {
+  if (target instanceof HTMLTextAreaElement || (target instanceof HTMLElement && target.isContentEditable)) {
+    return true;
+  }
+  if (!(target instanceof HTMLInputElement)) {
+    return false;
+  }
+  return !["range", "checkbox", "radio", "button", "submit", "reset", "color"].includes(target.type);
+}
+
 function quantizeTempo(value: number): number {
   return Math.round(clamp(value, 10, 600) * 2) / 2;
 }
@@ -1819,6 +2359,10 @@ function quantizeTempo(value: number): number {
 function formatPan(pan: number): string {
   const amount = Math.round(Math.abs(pan) * 100);
   return amount === 0 ? "Center" : `${pan < 0 ? "L" : "R"} ${amount}`;
+}
+
+function formatCents(cents: number): string {
+  return `${cents >= 0 ? "+" : ""}${cents} cents`;
 }
 
 // The Monologue's envelope knobs transmit CC values 64-127; stretch that span

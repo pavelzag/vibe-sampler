@@ -1,0 +1,78 @@
+name: Release macOS DMG
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: macos-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: vibe-sampler
+          workload_identity_provider: projects/148200456290/locations/global/workloadIdentityPools/github-actions/providers/vibe-sampler
+          service_account: github-release@vibe-sampler.iam.gserviceaccount.com
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build, sign, and notarize universal DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          signing_dir="${RUNNER_TEMP}/vibe-sampler-signing"
+          mkdir -p "${signing_dir}"
+          gcloud secrets versions access latest --secret=macos-certificate-p12-base64 | base64 --decode > "${signing_dir}/developer-id.p12"
+          gcloud secrets versions access latest --secret=apple-api-key-p8-base64 | base64 --decode > "${signing_dir}/AuthKey.p8"
+          chmod 600 "${signing_dir}/developer-id.p12" "${signing_dir}/AuthKey.p8"
+
+          export CSC_LINK="${signing_dir}/developer-id.p12"
+          export CSC_KEY_PASSWORD="$(gcloud secrets versions access latest --secret=macos-certificate-password)"
+          export APPLE_API_KEY="${signing_dir}/AuthKey.p8"
+          export APPLE_API_KEY_ID="$(gcloud secrets versions access latest --secret=apple-api-key-id)"
+          export APPLE_API_ISSUER="$(gcloud secrets versions access latest --secret=apple-api-issuer-id)"
+
+          npm run dist:mac
+
+          app_path="release/mac-universal/Vibe Sampler.app"
+          codesign --verify --deep --strict --verbose=2 "${app_path}"
+          xcrun stapler validate "${app_path}"
+          spctl --assess --verbose --type exec "${app_path}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vibe-sampler-macos-dmg
+          path: release/*.dmg
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" release/*.dmg --verify-tag --generate-notes --title "Vibe Sampler ${GITHUB_REF_NAME}"
