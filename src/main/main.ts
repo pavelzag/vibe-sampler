@@ -432,9 +432,13 @@ function createWindow(): void {
     log("error", "Renderer process gone", details);
   });
 
-  mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
-    const mappedLevel = level >= 3 ? "error" : level === 2 ? "warn" : "info";
-    log(mappedLevel, "Renderer console", { message, line, sourceId });
+  mainWindow.webContents.on("console-message", (details) => {
+    const mappedLevel = details.level === "error" ? "error" : details.level === "warning" ? "warn" : "info";
+    log(mappedLevel, "Renderer console", {
+      message: details.message,
+      line: details.lineNumber,
+      sourceId: details.sourceId
+    });
   });
 }
 
