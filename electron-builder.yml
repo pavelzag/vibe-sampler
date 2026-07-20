@@ -9,6 +9,7 @@ asar: true
 compression: maximum
 artifactName: ${productName}-${version}-${arch}.${ext}
 mac:
+  icon: build/icon.png
   target:
     - target: dmg
       arch:
