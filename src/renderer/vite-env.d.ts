@@ -3,6 +3,8 @@
 interface Window {
   vibeSampler: {
     appName: string;
+    getIsWindowMaximized: () => Promise<boolean>;
+    onWindowMaximizedStateChange: (callback: (isMaximized: boolean) => void) => () => void;
     getCloudSampleOnboarding: () => Promise<CloudSampleOnboarding>;
     declineCloudSamples: () => Promise<void>;
     importCloudSamples: () => Promise<UserSoundBank[]>;

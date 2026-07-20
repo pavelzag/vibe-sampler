@@ -38,6 +38,7 @@ import { installRendererErrorLogging, logError, logInfo, logWarn } from "./logge
 import { MidiActivity, MidiControlMessage, MidiManager, MidiStatus } from "./midi";
 import { applyPatternPreset, defaultPatternId, findPatternPreset, patternPresets, patternStepCount } from "./patterns";
 import { TransportScheduler } from "./transport";
+import pavelZagalskyByline from "./assets/pavel-zagalsky-byline.png";
 import "./styles.css";
 
 installRendererErrorLogging();
@@ -61,6 +62,7 @@ const defaultVolumeControls = [
 ];
 const volumeMapStorageKey = "vibe-sampler.volume-control-map.v4";
 const transportMapStorageKey = "vibe-sampler.transport-control-map.v4";
+const lastCustomBankStorageKey = "vibe-sampler.last-custom-bank.v1";
 const defaultTransportControls = {
   swing: { key: "cc:16", label: "CC 16" },
   master: { key: "cc:28", label: "CC 28" }
@@ -167,6 +169,7 @@ function App(): React.JSX.Element {
     korgDetected: false
   });
   const [message, setMessage] = useState("Ready");
+  const [isWindowMaximized, setIsWindowMaximized] = useState(false);
   const channelsRef = useRef(channels);
   const activeChannelIdRef = useRef(activeChannelId);
   const isPatternRecordArmedRef = useRef(isPatternRecordArmed);
@@ -213,6 +216,25 @@ function App(): React.JSX.Element {
   useEffect(() => {
     logInfo("App component mounted");
     return () => logInfo("App component unmounted");
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    const bridge = window.vibeSampler as Partial<Window["vibeSampler"]>;
+    if (typeof bridge.getIsWindowMaximized !== "function" || typeof bridge.onWindowMaximizedStateChange !== "function") {
+      setIsWindowMaximized(false);
+      return () => {
+        disposed = true;
+      };
+    }
+    void bridge.getIsWindowMaximized().then((isMaximized) => {
+      if (!disposed) setIsWindowMaximized(isMaximized);
+    });
+    const unsubscribe = bridge.onWindowMaximizedStateChange(setIsWindowMaximized);
+    return () => {
+      disposed = true;
+      unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
@@ -435,6 +457,9 @@ function App(): React.JSX.Element {
       setChannels((current) => applyUserBankToChannels(current, samples, envelopes));
       setUserBanks((current) => [...current.filter((item) => item.id !== bank.id), bank].sort((a, b) => a.name.localeCompare(b.name)));
       setSelectedBankId(bankId);
+      if (isCustomUserBank(bank)) {
+        localStorage.setItem(lastCustomBankStorageKey, bank.id);
+      }
       setMessage(`${bank.name} loaded`);
     } catch (error) {
       logError("Sound bank failed to load", { bankId, error });
@@ -444,13 +469,15 @@ function App(): React.JSX.Element {
     }
   }, []);
 
-  const refreshUserBanks = useCallback(async () => {
+  const refreshUserBanks = useCallback(async (): Promise<UserSoundBank[]> => {
     try {
       const library = await window.vibeSampler.listUserBanks();
       setUserBanks(library.banks);
       setSampleLibraryRoot(library.root);
+      return library.banks;
     } catch (error) {
       logWarn("Could not list user sound banks", error);
+      return [];
     }
   }, []);
 
@@ -513,10 +540,14 @@ function App(): React.JSX.Element {
   useEffect(() => {
     const resumeAudio = () => engine.resumeSoon();
     window.addEventListener("pointerdown", resumeAudio, { passive: true });
-    window.addEventListener("keydown", resumeAudio);
+    window.addEventListener("keydown", resumeAudio, { capture: true });
+    window.addEventListener("focus", resumeAudio);
+    document.addEventListener("visibilitychange", resumeAudio);
     return () => {
       window.removeEventListener("pointerdown", resumeAudio);
-      window.removeEventListener("keydown", resumeAudio);
+      window.removeEventListener("keydown", resumeAudio, { capture: true });
+      window.removeEventListener("focus", resumeAudio);
+      document.removeEventListener("visibilitychange", resumeAudio);
     };
   }, []);
 
@@ -825,7 +856,18 @@ function App(): React.JSX.Element {
   }, []);
 
   useEffect(() => {
-    void refreshUserBanks();
+    void refreshUserBanks().then((banks) => {
+      const tr909 = preferredRolandTr909Bank(banks);
+      const lastCustomBankId = localStorage.getItem(lastCustomBankStorageKey);
+      const lastCustom = lastCustomBankId
+        ? banks.find((bank) => bank.id === lastCustomBankId && isCustomUserBank(bank))
+        : null;
+      const fallbackCustom = banks.find(isCustomUserBank);
+      const startupBank = tr909 ?? lastCustom ?? fallbackCustom;
+      if (startupBank) {
+        void loadBank(userBankSelectionId(startupBank.id));
+      }
+    });
     void window.vibeSampler.getCloudSampleOnboarding()
       .then((onboarding) => {
         if (onboarding.shouldPrompt) {
@@ -833,7 +875,7 @@ function App(): React.JSX.Element {
         }
       })
       .catch((error) => logWarn("Could not check starter sample catalog", error));
-  }, [refreshUserBanks]);
+  }, [loadBank, refreshUserBanks]);
 
   async function declineStarterSamples(): Promise<void> {
     await window.vibeSampler.declineCloudSamples();
@@ -849,8 +891,9 @@ function App(): React.JSX.Element {
       setUserBanks((current) => [...current.filter((item) => !banks.some((bank) => bank.id === item.id)), ...banks]
         .sort((left, right) => left.name.localeCompare(right.name)));
       setCloudOnboarding(null);
-      if (banks[0]) {
-        await loadBank(userBankSelectionId(banks[0].id));
+      const startupBank = preferredRolandTr909Bank(banks) ?? banks[0];
+      if (startupBank) {
+        await loadBank(userBankSelectionId(startupBank.id));
       }
       setMessage(`Added ${banks.length} starter sample pack${banks.length === 1 ? "" : "s"}`);
     } catch (error) {
@@ -873,6 +916,7 @@ function App(): React.JSX.Element {
       const bank = await window.vibeSampler.createUserBank(requestedName);
       setUserBanks((current) => [...current, bank].sort((a, b) => a.name.localeCompare(b.name)));
       setSelectedBankId(userBankSelectionId(bank.id));
+      localStorage.setItem(lastCustomBankStorageKey, bank.id);
       setChannels((current) => applyUserBankToChannels(current, Array.from({ length: 8 }, () => null)));
       setNewBankName("");
       setIsBankCreatorOpen(false);
@@ -893,11 +937,13 @@ function App(): React.JSX.Element {
     const existing = userBanks.find((bank) => bank.name.toLowerCase() === "recordings");
     if (existing) {
       setSelectedBankId(userBankSelectionId(existing.id));
+      localStorage.setItem(lastCustomBankStorageKey, existing.id);
       return existing;
     }
     const bank = await window.vibeSampler.createUserBank("Recordings");
     setUserBanks((current) => [...current, bank].sort((a, b) => a.name.localeCompare(b.name)));
     setSelectedBankId(userBankSelectionId(bank.id));
+    localStorage.setItem(lastCustomBankStorageKey, bank.id);
     return bank;
   }
 
@@ -1242,7 +1288,7 @@ function App(): React.JSX.Element {
   }
 
   return (
-    <main className="app">
+    <main className={isWindowMaximized ? "app maximized-view" : "app compact-view"}>
       {cloudOnboarding ? (
         <div className="dialog-backdrop" role="presentation">
           <section className="bank-dialog starter-dialog" role="dialog" aria-modal="true" aria-labelledby="starter-title">
@@ -1308,115 +1354,118 @@ function App(): React.JSX.Element {
         </div>
       ) : null}
       <header className="topbar">
-        <div>
-          <h1>Vibe Sampler</h1>
-          <p>8-channel recorder, MIDI pad map, and x0x-style sequencer</p>
+        <div className="brand-lockup">
+          <h1>VIBE <span>SAMPLER</span></h1>
+          <p>MIDI PRODUCTION CENTER · SAMPLER / SEQUENCER</p>
+          <img className="creator-byline" src={pavelZagalskyByline} alt="by Pavel Zagalsky" />
         </div>
         <div className="transport">
-          <label className="bank-select">
-            <span>Pattern</span>
-            <select value={selectedPatternId} onChange={(event) => applyPattern(event.target.value)}>
-              {patternPresets.map((pattern) => (
-                <option key={pattern.id} value={pattern.id}>
-                  {pattern.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="bank-select">
-            <span>Bank</span>
-            <select
-              value={selectedBankId}
-              disabled={isBankLoading}
-              onChange={(event) => void loadBank(event.target.value)}
+          <div className="transport-main">
+            <label className="bank-select">
+              <span>Pattern</span>
+              <select value={selectedPatternId} onChange={(event) => applyPattern(event.target.value)}>
+                {patternPresets.map((pattern) => (
+                  <option key={pattern.id} value={pattern.id}>
+                    {pattern.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="bank-select">
+              <span>Bank</span>
+              <select
+                value={selectedBankId}
+                disabled={isBankLoading}
+                onChange={(event) => void loadBank(event.target.value)}
+              >
+                <option value="" disabled>{userBanks.length ? "Choose pack" : "No packs yet"}</option>
+                {userBanks.length ? (
+                  <optgroup label="Local packs">
+                    {userBanks.map((bank) => (
+                      <option key={bank.id} value={userBankSelectionId(bank.id)}>
+                        {bank.name}
+                      </option>
+                    ))}
+                  </optgroup>
+                ) : null}
+              </select>
+            </label>
+            <button
+              className="add-bank-button"
+              onClick={() => {
+                setBankCreationError("");
+                setIsBankCreatorOpen(true);
+              }}
+              title={sampleLibraryRoot || "Add user bank"}
             >
-              <option value="" disabled>{userBanks.length ? "Choose pack" : "No packs yet"}</option>
-              {userBanks.length ? (
-                <optgroup label="Local packs">
-                  {userBanks.map((bank) => (
-                    <option key={bank.id} value={userBankSelectionId(bank.id)}>
-                      {bank.name}
+              <Plus size={15} />
+              Bank
+            </button>
+            <button className={isPlaying ? "primary active" : "primary"} onClick={togglePlayback}>
+              {isPlaying ? <Pause size={18} /> : <Play size={18} />}
+              {isPlaying ? "Stop" : "Play"}
+            </button>
+            <BpmInput value={tempo} onCommit={setTempo} />
+          </div>
+          <div className="transport-right">
+            <div className="transport-knob-row">
+              <RotaryKnob
+                label="Swing"
+                value={Math.round(swing * 100)}
+                min={0}
+                max={55}
+                step={1}
+                defaultValue={0}
+                format={(value) => `${Math.round(value)}%`}
+                onChange={(value) => setSwing(value / 100)}
+              />
+              <RotaryKnob
+                label="Master"
+                value={Math.round(masterLevel * 100)}
+                min={0}
+                max={100}
+                step={1}
+                defaultValue={90}
+                format={(value) => `${Math.round(value)}%`}
+                onChange={(value) => setMasterLevel(value / 100)}
+              />
+            </div>
+            <div className="transport-midi-row">
+              <label className="midi-channel-select">
+                <span>MIDI</span>
+                <select
+                  aria-label="MIDI input channel"
+                  value={midiInputChannel ?? "all"}
+                  onChange={(event) => {
+                    const channel = event.target.value === "all" ? null : Number(event.target.value);
+                    setMidiInputChannel(channel);
+                    midiRef.current?.setInputChannel(channel);
+                    setMessage(channel === null ? "Listening on all MIDI channels" : `Listening on MIDI channel ${channel}`);
+                  }}
+                >
+                  <option value="all">All channels</option>
+                  {midiChannelOptions.map((channel) => (
+                    <option value={channel} key={channel}>
+                      Channel {channel}
                     </option>
                   ))}
-                </optgroup>
-              ) : null}
-            </select>
-          </label>
-          <button
-            className="add-bank-button"
-            onClick={() => {
-              setBankCreationError("");
-              setIsBankCreatorOpen(true);
-            }}
-            title={sampleLibraryRoot || "Add user bank"}
-          >
-            <Plus size={15} />
-            Bank
-          </button>
-          <button className={isPlaying ? "primary active" : "primary"} onClick={togglePlayback}>
-            {isPlaying ? <Pause size={18} /> : <Play size={18} />}
-            {isPlaying ? "Stop" : "Play"}
-          </button>
-          <label className="tempo">
-            <span>BPM</span>
-            <input
-              min="10"
-              max="600"
-              step="0.5"
-              type="number"
-              value={tempo}
-              onChange={(event) => setTempo(quantizeTempo(Number(event.target.value)))}
-            />
-          </label>
-          <label className="tempo">
-            <span>Swing</span>
-            <input
-              min="0"
-              max="55"
-              type="number"
-              value={Math.round(swing * 100)}
-              onChange={(event) => setSwing(Math.max(0, Math.min(55, Number(event.target.value))) / 100)}
-            />
-          </label>
-          <label className="tempo">
-            <span>Master</span>
-            <input
-              min="0"
-              max="100"
-              type="number"
-              value={Math.round(masterLevel * 100)}
-              onChange={(event) => setMasterLevel(Math.max(0, Math.min(100, Number(event.target.value))) / 100)}
-            />
-          </label>
-          <label className="midi-channel-select">
-            <span>MIDI</span>
-            <select
-              aria-label="MIDI input channel"
-              value={midiInputChannel ?? "all"}
-              onChange={(event) => {
-                const channel = event.target.value === "all" ? null : Number(event.target.value);
-                setMidiInputChannel(channel);
-                midiRef.current?.setInputChannel(channel);
-                setMessage(channel === null ? "Listening on all MIDI channels" : `Listening on MIDI channel ${channel}`);
-              }}
-            >
-              <option value="all">All channels</option>
-              {midiChannelOptions.map((channel) => (
-                <option value={channel} key={channel}>
-                  Channel {channel}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="midi-pill">
-            <Radio size={16} />
-            {midiStatus.connectedInputs.length ? midiStatus.connectedInputs.join(", ") : midiStatus.supported ? "No MIDI input" : "MIDI unsupported"}
+                </select>
+              </label>
+              <div className="midi-pill">
+                <Radio size={16} />
+                {midiStatus.connectedInputs.length ? midiStatus.connectedInputs.join(", ") : midiStatus.supported ? "No MIDI input" : "MIDI unsupported"}
+              </div>
+            </div>
           </div>
         </div>
       </header>
 
       <section className="workspace">
         <aside className="channels">
+          <div className="pad-bank-title">
+            <span>PAD BANK</span>
+            <small>8 VELOCITY CHANNELS</small>
+          </div>
           {channels.map((channel) => (
             <button
               className={`channel${channel.id === activeChannelId ? " selected" : ""}${channel.soloed ? " soloed" : ""}`}
@@ -1895,6 +1944,149 @@ function App(): React.JSX.Element {
   );
 }
 
+function BpmInput({ value, onCommit }: { value: number; onCommit: (value: number) => void }): React.JSX.Element {
+  const [draft, setDraft] = useState(String(value));
+  const editingRef = useRef(false);
+
+  useEffect(() => {
+    if (!editingRef.current) {
+      setDraft(String(value));
+    }
+  }, [value]);
+
+  const commit = () => {
+    const parsed = Number(draft);
+    if (!Number.isFinite(parsed)) {
+      setDraft(String(value));
+      return;
+    }
+    const next = quantizeTempo(parsed);
+    setDraft(String(next));
+    onCommit(next);
+  };
+
+  return (
+    <label className="tempo bpm-control">
+      <span>BPM</span>
+      <input
+        aria-label="Tempo in beats per minute"
+        inputMode="decimal"
+        min="10"
+        max="600"
+        step="0.5"
+        type="number"
+        value={draft}
+        onFocus={(event) => {
+          editingRef.current = true;
+          event.currentTarget.select();
+        }}
+        onChange={(event) => setDraft(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            event.stopPropagation();
+            commit();
+            event.currentTarget.blur();
+          } else if (event.key === "Escape") {
+            event.preventDefault();
+            setDraft(String(value));
+            event.currentTarget.blur();
+          }
+        }}
+        onBlur={() => {
+          commit();
+          editingRef.current = false;
+        }}
+      />
+      <kbd>Enter</kbd>
+    </label>
+  );
+}
+
+const RotaryKnob = React.memo(function RotaryKnob({
+  label,
+  value,
+  min,
+  max,
+  step,
+  defaultValue,
+  format,
+  onChange
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  defaultValue: number;
+  format: (value: number) => string;
+  onChange: (value: number) => void;
+}): React.JSX.Element {
+  const dragRef = useRef<{ pointerId: number; startY: number; startValue: number } | null>(null);
+  const valueRef = useRef(value);
+  valueRef.current = value;
+
+  const setValue = (rawValue: number) => {
+    const stepped = Math.round(rawValue / step) * step;
+    const next = clamp(stepped, min, max);
+    valueRef.current = next;
+    onChange(next);
+  };
+  const angle = -135 + ((value - min) / (max - min)) * 270;
+
+  return (
+    <div className="transport-knob">
+      <span className="transport-knob-label">{label}</span>
+      <span
+        className="transport-knob-face"
+        style={{ "--knob-angle": `${angle}deg` } as React.CSSProperties}
+        role="slider"
+        tabIndex={0}
+        aria-label={label}
+        aria-valuemin={min}
+        aria-valuemax={max}
+        aria-valuenow={value}
+        aria-valuetext={format(value)}
+        title="Drag up or down · arrow keys adjust · double-click resets"
+        onPointerDown={(event) => {
+          event.preventDefault();
+          event.currentTarget.focus();
+          event.currentTarget.setPointerCapture(event.pointerId);
+          dragRef.current = { pointerId: event.pointerId, startY: event.clientY, startValue: valueRef.current };
+        }}
+        onPointerMove={(event) => {
+          const drag = dragRef.current;
+          if (!drag || drag.pointerId !== event.pointerId) return;
+          const range = max - min;
+          const sensitivity = event.shiftKey ? 400 : 160;
+          setValue(drag.startValue + ((drag.startY - event.clientY) / sensitivity) * range);
+        }}
+        onPointerUp={(event) => {
+          if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null;
+        }}
+        onPointerCancel={() => {
+          dragRef.current = null;
+        }}
+        onDoubleClick={() => setValue(defaultValue)}
+        onKeyDown={(event) => {
+          if (!["ArrowUp", "ArrowRight", "ArrowDown", "ArrowLeft", "Home", "End"].includes(event.key)) return;
+          event.preventDefault();
+          event.stopPropagation();
+          if (event.key === "Home") setValue(defaultValue);
+          else if (event.key === "End") setValue(max);
+          else {
+            const direction = ["ArrowUp", "ArrowRight"].includes(event.key) ? 1 : -1;
+            setValue(valueRef.current + direction * step * (event.shiftKey ? 5 : 1));
+          }
+        }}
+      >
+        <i />
+      </span>
+      <output>{format(value)}</output>
+    </div>
+  );
+});
+
 const ParameterSlider = React.memo(function ParameterSlider({
   label,
   min,
@@ -2332,6 +2524,18 @@ function sanitizeTransportControl(control: StoredControl, fallback: StoredContro
 
 function shouldShowMidiEvent(event: MidiActivity): boolean {
   return event.label !== "Timing clock" && event.label !== "Active sensing";
+}
+
+function isCustomUserBank(bank: UserSoundBank): boolean {
+  return !bank.id.startsWith("starter-");
+}
+
+function preferredRolandTr909Bank(banks: UserSoundBank[]): UserSoundBank | null {
+  return (
+    banks.find((bank) => bank.id === "starter-roland-tr-909") ??
+    banks.find((bank) => /^starter-roland-tr-909-\d+$/.test(bank.id)) ??
+    null
+  );
 }
 
 function clamp(value: number, min: number, max: number): number {

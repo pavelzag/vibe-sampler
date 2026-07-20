@@ -138,8 +138,8 @@ export class SamplerEngine {
   private bitcrusherSettings = { bits: 6, ratio: 8 };
 
   constructor() {
-    logInfo("Initializing AudioContext", { latencyHint: 0.003 });
-    this.context = new AudioContext({ latencyHint: 0.003 });
+    logInfo("Initializing AudioContext", { latencyHint: 0.001 });
+    this.context = new AudioContext({ latencyHint: 0.001 });
     logInfo("AudioContext initialized", {
       state: this.context.state,
       sampleRate: this.context.sampleRate,
@@ -380,7 +380,7 @@ export class SamplerEngine {
     click.stop(when + 0.016);
   }
 
-  play(channel: Channel, velocity = 1, when = this.context.currentTime): boolean {
+  play(channel: Channel, velocity = 1, when?: number): boolean {
     if (!channel.sample || channel.muted) {
       return false;
     }
@@ -401,10 +401,13 @@ export class SamplerEngine {
     const source = this.context.createBufferSource();
     const velocityGain = this.context.createGain();
     const envelopeGain = this.context.createGain();
+    // Immediate keyboard/MIDI hits take their timestamp after node construction,
+    // while sequencer calls keep their explicit look-ahead time.
+    const startTime = when ?? this.context.currentTime;
     source.buffer = channel.sample.buffer;
-    source.playbackRate.setValueAtTime(playbackRate, when);
+    source.playbackRate.setValueAtTime(playbackRate, startTime);
     velocityGain.gain.value = clamp(velocity, 0, 1);
-    applyEnvelope(envelopeGain.gain, channel.envelope, when, playbackDuration);
+    applyEnvelope(envelopeGain.gain, channel.envelope, startTime, playbackDuration);
     source.connect(velocityGain);
     velocityGain.connect(envelopeGain);
     envelopeGain.connect(this.channelGains[channel.id]);
@@ -412,7 +415,7 @@ export class SamplerEngine {
     envelopeGain.connect(this.channelFxSends.reverb[channel.id]);
     envelopeGain.connect(this.channelFxSends.delay[channel.id]);
     envelopeGain.connect(this.channelFxSends.bitcrusher[channel.id]);
-    source.start(when, channel.sample.trimStart, playbackDuration * playbackRate);
+    source.start(startTime, channel.sample.trimStart, playbackDuration * playbackRate);
     return true;
   }
 

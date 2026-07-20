@@ -389,9 +389,18 @@ function createWindow(): void {
       preload: preloadPath,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      backgroundThrottling: false
     }
   });
+
+  const publishWindowState = () => {
+    mainWindow.webContents.send("window:maximized-state", mainWindow.isMaximized() || mainWindow.isFullScreen());
+  };
+  mainWindow.on("maximize", publishWindowState);
+  mainWindow.on("unmaximize", publishWindowState);
+  mainWindow.on("enter-full-screen", publishWindowState);
+  mainWindow.on("leave-full-screen", publishWindowState);
 
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   mainWindow.webContents.on("will-navigate", (event, url) => {
@@ -459,6 +468,10 @@ app.whenReady().then(async () => {
   });
 
   registerSampleLibraryIpc();
+  ipcMain.handle("window:is-maximized", (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    return Boolean(window && (window.isMaximized() || window.isFullScreen()));
+  });
 
   session.defaultSession.setPermissionCheckHandler((_webContents, permission) =>
     permission === "media" || permission === "midi" ||
